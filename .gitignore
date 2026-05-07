@@ -1,0 +1,15 @@
+# Cargo build output
+/target/
+
+# Local environment overrides (RPC_URL, PREDICT_SERVER); committed file is .env.example
+.env
+.env.local
+
+# Editor/OS noise (also covered by repo-root .gitignore, kept here for standalone use)
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Release artifacts produced locally (e.g. `cargo dist build`)
+/dist/

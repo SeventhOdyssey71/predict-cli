@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "predict-cli"
+version = "0.1.0"
+edition = "2021"
+description = "DeepBook Predict CLI for Sui testnet"
+license = "Apache-2.0"
+repository = "https://github.com/SeventhOdyssey71/predict-cli"
+homepage = "https://github.com/SeventhOdyssey71/predict-cli"
+keywords = ["sui", "deepbook", "predict", "cli", "testnet"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+
+[[bin]]
+name = "predict-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+dotenvy = "0.15"
+owo-colors = "4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
