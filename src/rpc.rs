@@ -126,7 +126,7 @@ impl Rpc {
         amount: u64,
     ) -> Result<Vec<Coin>> {
         let mut coins = self.get_all_coins(owner, coin_type).await?;
-        coins.sort_by(|a, b| b.balance.cmp(&a.balance));
+        coins.sort_by_key(|c| std::cmp::Reverse(c.balance));
 
         let mut selected = Vec::new();
         let mut total = 0u128;
