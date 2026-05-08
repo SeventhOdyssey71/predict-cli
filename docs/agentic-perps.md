@@ -248,10 +248,10 @@ Tests:
 
 The branch should evolve in roughly this shape:
 
-- **M0 — design** (this doc). Lock the plan format. Lock the safety story. Decide the file layout.
-- **M1 — structured intent only.** `agent open --side --asset --tenor --risk` works end-to-end with no LLM. Position store works. `agent positions` and `agent close` work. This is already shippable for the hackathon.
-- **M2 — settlement daemon.** `agent watch` redeems matured positions automatically. No new positions get opened by the daemon yet.
-- **M3 — auto-roll.** Daemon can roll a position into the next expiry under the plan's policy, bounded by the budget.
+- **M0 — design** ✅ (this doc). Locked the plan format, the safety story, and the file layout.
+- **M1 — structured intent** ✅. `agent open --side --asset --tenor --risk` works end-to-end with no LLM; `agent positions`, `agent close`, and `agent inspect` round-trip the local store. Already shippable.
+- **M2 — settlement daemon** ✅. `agent watch [--once] [--interval] [--only]` polls predict-server, redeems matured positions per their `exit_policy.on_settlement`, and transitions them to `Settled`. Idempotent across crashes via `redeem_pending → redeemed` markers.
+- **M3 — auto-roll.** Daemon rolls a position into the next expiry under the plan's `RollingPolicy`, bounded by `max_total_spend_usdc` and `max_total_tenor_minutes`.
 - **M4 — natural-language intent.** `agent ask "..."` with the LLM planner. Same plan format underneath; the model just produces the JSON.
 - **M5 — polish.** Notifications, copy-trade, multi-position dashboards, telegram-bot bridge.
 

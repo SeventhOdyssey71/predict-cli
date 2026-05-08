@@ -124,7 +124,7 @@ async fn submit_leg(leg: &Leg) -> Result<()> {
     }
 }
 
-async fn redeem_leg(leg: &Leg, permissionless: bool) -> Result<()> {
+pub(crate) async fn redeem_leg(leg: &Leg, permissionless: bool) -> Result<()> {
     match leg {
         Leg::MintBinary {
             oracle_id,

@@ -220,6 +220,21 @@ enum AgentCmd {
     },
     /// Print the full record of a single position.
     Inspect { id: String },
+
+    /// Watch open positions and redeem them automatically when their oracles
+    /// settle. Per-position exit policy decides permissionless vs owner redeem.
+    /// No auto-roll yet (that lands in M3).
+    Watch {
+        /// Poll cadence in seconds.
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
+        /// Run a single cycle and exit. Useful for cron and CI smoke tests.
+        #[arg(long)]
+        once: bool,
+        /// Only watch one position by id.
+        #[arg(long)]
+        only: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -366,6 +381,21 @@ async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
         AgentCmd::Positions => commands::agent::positions(json).await,
         AgentCmd::Close { id } => commands::agent::close(&id, json).await,
         AgentCmd::Inspect { id } => commands::agent::inspect(&id).await,
+        AgentCmd::Watch {
+            interval,
+            once,
+            only,
+        } => {
+            commands::agent::watch(
+                commands::agent::WatchArgs {
+                    interval,
+                    once,
+                    only,
+                },
+                json,
+            )
+            .await
+        }
     }
 }
 

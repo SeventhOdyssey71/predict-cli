@@ -7,10 +7,13 @@ use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use owo_colors::OwoColorize;
 
+use std::time::Duration;
+
 use crate::agent::exec;
 use crate::agent::intent::{intent_to_plan, IntentSide, StructuredIntent};
 use crate::agent::plan::RollingPolicy;
 use crate::agent::store::{PositionStatus, Store};
+use crate::agent::watch::{self, WatchConfig};
 use crate::format::label;
 
 #[derive(Debug, Clone)]
@@ -129,6 +132,23 @@ pub async fn close(id: &str, json: bool) -> Result<()> {
         println!("{} closed {}", "✓".green(), id);
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchArgs {
+    pub interval: u64,
+    pub once: bool,
+    pub only: Option<String>,
+}
+
+pub async fn watch(args: WatchArgs, json: bool) -> Result<()> {
+    let cfg = WatchConfig {
+        interval: Duration::from_secs(args.interval.max(1)),
+        once: args.once,
+        only: args.only,
+        json,
+    };
+    watch::run(cfg).await
 }
 
 pub async fn inspect(id: &str) -> Result<()> {
