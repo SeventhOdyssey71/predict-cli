@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::agent::exec;
 use crate::agent::intent::{intent_to_plan, IntentSide, StructuredIntent};
+use crate::agent::llm::{self, Provider};
 use crate::agent::plan::RollingPolicy;
 use crate::agent::store::{PositionStatus, Store};
 use crate::agent::watch::{self, WatchConfig};
@@ -131,6 +132,62 @@ pub async fn close(id: &str, json: bool) -> Result<()> {
         println!();
         println!("{} closed {}", "✓".green(), id);
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct AskArgs {
+    pub prompt: String,
+    pub provider: Option<String>,
+    pub yes: bool,
+    pub rolling: String,
+}
+
+pub async fn ask(args: AskArgs, json: bool) -> Result<()> {
+    let provider = Provider::from_str_or_env(args.provider.as_deref())?;
+
+    if !json {
+        println!("{}", "agent ask".bold());
+        println!("  provider  {}", provider.label());
+        println!("  prompt    {}", args.prompt);
+        println!();
+    }
+
+    let mut intent = llm::resolve(&args.prompt, provider).await?;
+    intent.rolling = parse_rolling(&args.rolling)?;
+
+    let mut store = Store::load()?;
+    if let Some(tag) = intent.tag.as_deref() {
+        if store.id_in_use(tag) {
+            bail!(
+                "tag `{tag}` is already in use. Pick another, or close it first with \
+                 `predict-cli agent close {tag}`."
+            );
+        }
+    }
+
+    let plan = intent_to_plan(&intent).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(());
+    }
+
+    print_plan_summary(&plan);
+
+    if !args.yes && !confirm()? {
+        println!("aborted.");
+        return Ok(());
+    }
+
+    let position = exec::execute(plan).await?;
+    store.upsert(position.clone());
+    store.save()?;
+
+    println!();
+    println!("{} {}", "✓".green(), "position opened".bold());
+    println!("  id    {}", position.id);
+    println!("  view  {}", position.plan.directional_view);
     Ok(())
 }
 

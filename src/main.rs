@@ -221,9 +221,28 @@ enum AgentCmd {
     /// Print the full record of a single position.
     Inspect { id: String },
 
+    /// Open a position from a free-text intent. Default provider is the offline
+    /// regex parser (no API key required). Set --provider anthropic (or
+    /// PREDICT_AGENT_PROVIDER=anthropic) plus ANTHROPIC_API_KEY for an LLM-backed
+    /// parser. Either way the same Plan validation runs locally before any tx.
+    Ask {
+        /// Free-text intent, e.g. "long BTC for 1h, $50".
+        prompt: String,
+        /// Provider override: none | anthropic. Falls back to
+        /// PREDICT_AGENT_PROVIDER, then to none.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Rolling policy: none | auto.
+        #[arg(long, default_value = "none")]
+        rolling: String,
+        /// Skip the confirm prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
     /// Watch open positions and redeem them automatically when their oracles
-    /// settle. Per-position exit policy decides permissionless vs owner redeem.
-    /// No auto-roll yet (that lands in M3).
+    /// settle. With AutoOnSettlement rolling, a fresh leg is also opened in the
+    /// next expiry as long as budget and tenor permit (M3).
     Watch {
         /// Poll cadence in seconds.
         #[arg(long, default_value_t = 30)]
@@ -371,6 +390,23 @@ async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
                     tenor,
                     risk,
                     tag,
+                    rolling,
+                    yes,
+                },
+                json,
+            )
+            .await
+        }
+        AgentCmd::Ask {
+            prompt,
+            provider,
+            rolling,
+            yes,
+        } => {
+            commands::agent::ask(
+                commands::agent::AskArgs {
+                    prompt,
+                    provider,
                     rolling,
                     yes,
                 },

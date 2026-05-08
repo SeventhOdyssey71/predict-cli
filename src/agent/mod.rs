@@ -7,6 +7,7 @@
 
 pub mod exec;
 pub mod intent;
+pub mod llm;
 pub mod plan;
 pub mod roll;
 pub mod store;
