@@ -494,8 +494,15 @@ mod tests {
         assert!(parse_intent_json("not json").is_err());
     }
 
+    // Tests below mutate the process-wide PREDICT_AGENT_PROVIDER env var.
+    // Cargo's default test runner is multi-threaded, so we serialize them
+    // via this mutex to avoid one test's env_setvar racing another's
+    // remove_var. Any new env-touching test must take this lock.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn provider_from_str_or_env_picks_explicit_first() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("PREDICT_AGENT_PROVIDER", "anthropic");
         assert_eq!(
             Provider::from_str_or_env(Some("none")).unwrap(),
@@ -506,6 +513,7 @@ mod tests {
 
     #[test]
     fn provider_from_str_or_env_falls_back_to_env() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("PREDICT_AGENT_PROVIDER", "anthropic");
         assert_eq!(
             Provider::from_str_or_env(None).unwrap(),
@@ -516,6 +524,7 @@ mod tests {
 
     #[test]
     fn provider_default_is_none() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PREDICT_AGENT_PROVIDER");
         assert_eq!(Provider::from_str_or_env(None).unwrap(), Provider::None);
     }
