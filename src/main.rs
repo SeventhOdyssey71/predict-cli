@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
+mod agent;
 mod commands;
 mod config;
 mod format;
@@ -174,6 +175,51 @@ enum Cmd {
     /// Prints the exact next command for anything missing.
     #[command(visible_alias = "setup")]
     Doctor,
+
+    /// Manage agent-driven "perp" positions: open, list, close, inspect.
+    /// M1 surface is structured-DSL only; `agent ask "..."` arrives in M4.
+    Agent {
+        #[command(subcommand)]
+        sub: AgentCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Open a managed position from a structured intent.
+    Open {
+        /// up | down | range
+        #[arg(long)]
+        side: String,
+        /// Underlying asset: BTC (more soon).
+        #[arg(long, default_value = "BTC")]
+        asset: String,
+        /// Tenor: e.g. 30m, 1h, 90m. Picks the active oracle whose remaining
+        /// time best matches.
+        #[arg(long, default_value = "1h")]
+        tenor: String,
+        /// Risk budget in DUSDC. Caps total spend for the entire position.
+        #[arg(long)]
+        risk: f64,
+        /// Stable id for this position. Defaults to a generated `p-XXXXXXXX`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Rolling policy: none (single-shot) | auto (M3+; ignored at M1).
+        #[arg(long, default_value = "none")]
+        rolling: String,
+        /// Skip the confirm prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// List managed positions and their current state.
+    Positions,
+    /// Close a managed position. Owner-redeems every still-open leg.
+    Close {
+        /// Position id (`tag` from `agent open` or the generated `p-…`).
+        id: String,
+    },
+    /// Print the full record of a single position.
+    Inspect { id: String },
 }
 
 #[tokio::main]
@@ -288,6 +334,38 @@ async fn main() -> Result<()> {
         Cmd::Withdraw { plp } => commands::trade::withdraw(&plp).await,
         Cmd::Faucet => commands::faucet::run().await,
         Cmd::Doctor => commands::doctor::run().await,
+        Cmd::Agent { sub } => dispatch_agent(sub, cli.json).await,
+    }
+}
+
+async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
+    match sub {
+        AgentCmd::Open {
+            side,
+            asset,
+            tenor,
+            risk,
+            tag,
+            rolling,
+            yes,
+        } => {
+            commands::agent::open(
+                commands::agent::OpenArgs {
+                    side,
+                    asset,
+                    tenor,
+                    risk,
+                    tag,
+                    rolling,
+                    yes,
+                },
+                json,
+            )
+            .await
+        }
+        AgentCmd::Positions => commands::agent::positions(json).await,
+        AgentCmd::Close { id } => commands::agent::close(&id, json).await,
+        AgentCmd::Inspect { id } => commands::agent::inspect(&id).await,
     }
 }
 

@@ -257,6 +257,16 @@ The branch should evolve in roughly this shape:
 
 Each milestone is a stand-alone product. We do not need M4 to ship something useful.
 
+## Mobile companion (gamified surface)
+
+The CLI is the engine. For consumers, the engine alone isn't enough — they need a surface that doesn't require a terminal. The complementary product is a gamified mobile/PWA app that wraps the same agentic loop.
+
+The full mobile design lives in [`docs/mobile-companion.md`](mobile-companion.md). One-paragraph version here:
+
+A native-feeling PWA (or React Native shell) where the home screen is a stack of "live position" cards rendered as animated tickers. Onboarding is zkLogin → first deposit in 30 seconds. The intent screen takes voice or three taps ("BTC", "Up", "$10 / 1h") and the resulting plan is shown the way fitness apps show a workout: a single-screen card with the worst case, expected payout, and a confirm-slider. Settlements are revealed as a mini-animation (a slot-machine-style flip), with confetti on a win. Streaks, XP, badges, and weekly leaderboards run on top. The app talks to a thin backend that wraps the same `agent` engine the CLI uses; the protocol-level safety invariants are unchanged.
+
+This is the "anything that surfaces a behavior the canonical pro UI won't" half of the hackathon brief, and the agentic engine in this branch is what makes it possible without rebuilding business logic per surface.
+
 ## What this is *not*
 
 - It is not a managed-funds product. The agent never custodies user funds; everything routes through the user's keystore via `sui client ptb`, identical to today.
