@@ -251,11 +251,11 @@ The branch should evolve in roughly this shape:
 - **M0 — design** ✅ (this doc). Locked the plan format, the safety story, and the file layout.
 - **M1 — structured intent** ✅. `agent open --side --asset --tenor --risk` works end-to-end with no LLM; `agent positions`, `agent close`, and `agent inspect` round-trip the local store. Already shippable.
 - **M2 — settlement daemon** ✅. `agent watch [--once] [--interval] [--only]` polls predict-server, redeems matured positions per their `exit_policy.on_settlement`, and transitions them to `Settled`. Idempotent across crashes via `redeem_pending → redeemed` markers.
-- **M3 — auto-roll.** Daemon rolls a position into the next expiry under the plan's `RollingPolicy`, bounded by `max_total_spend_usdc` and `max_total_tenor_minutes`.
-- **M4 — natural-language intent.** `agent ask "..."` with the LLM planner. Same plan format underneath; the model just produces the JSON.
-- **M5 — polish.** Notifications, copy-trade, multi-position dashboards, telegram-bot bridge.
+- **M3 — auto-roll** ✅. When a leg's `RollingPolicy` is `AutoOnSettlement`, the daemon plans + submits a fresh leg into the next active oracle, bounded by `max_total_spend_usdc` and `max_total_tenor_minutes`.
+- **M4 — natural-language intent** ✅. `agent ask "long BTC for 1h, $50"`. Two backends: an offline regex parser (default, no API key) and Anthropic. Both emit the same `StructuredIntent`; the local planner produces the validated `Plan`.
+- **M5 — polish** ✅. `--notify-webhook` and `--notify-cmd` hooks for `agent watch`, full `CHANGELOG.md`, version bump to 0.2.0, README documents the agent surface.
 
-Each milestone is a stand-alone product. We do not need M4 to ship something useful.
+Each milestone is a stand-alone product. The whole stack is now shipped on `feat/predict-agentic-cli`.
 
 ## Mobile companion (gamified surface)
 

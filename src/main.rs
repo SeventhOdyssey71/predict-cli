@@ -253,6 +253,15 @@ enum AgentCmd {
         /// Only watch one position by id.
         #[arg(long)]
         only: Option<String>,
+        /// POST each CycleEvent as JSON to this URL (Discord/Telegram/Slack
+        /// incoming webhooks, custom servers, ntfy.sh, etc).
+        #[arg(long)]
+        notify_webhook: Option<String>,
+        /// Run a shell command on each event with EVENT_KIND, POSITION_ID,
+        /// LEG_INDEX, DETAIL injected as env vars. Example:
+        /// `--notify-cmd 'osascript -e "display notification \"$DETAIL\""'`.
+        #[arg(long)]
+        notify_cmd: Option<String>,
     },
 }
 
@@ -421,12 +430,16 @@ async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
             interval,
             once,
             only,
+            notify_webhook,
+            notify_cmd,
         } => {
             commands::agent::watch(
                 commands::agent::WatchArgs {
                     interval,
                     once,
                     only,
+                    notify_webhook,
+                    notify_cmd,
                 },
                 json,
             )

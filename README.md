@@ -197,6 +197,39 @@ predict-cli supply --amount 1000
 predict-cli withdraw 0xabcd…
 ```
 
+## Agentic Perps
+
+A managed-position layer on top of the imperative trade commands. Every existing command keeps working; `agent` is additive.
+
+```bash
+# 1. Structured intent (no LLM, fully offline)
+predict-cli agent open --side up --asset BTC --tenor 1h --risk 50
+
+# 2. Natural-language intent (default backend = offline regex; no API key)
+predict-cli agent ask "long BTC for 1h, $50"
+
+# 3. Same, with Claude as the parser
+PREDICT_AGENT_PROVIDER=anthropic ANTHROPIC_API_KEY=… \
+  predict-cli agent ask "I think BTC chops between 80k and 84k for the next 90 minutes, 25 dusdc"
+
+# 4. List, inspect, close
+predict-cli agent positions
+predict-cli agent inspect <id>
+predict-cli agent close <id>
+
+# 5. Settlement daemon: redeems matured positions and (with --rolling auto) rolls into the next expiry
+predict-cli agent watch                          # 30s polling, runs forever
+predict-cli agent watch --once                   # one cycle, cron-friendly
+predict-cli agent watch --notify-webhook https://discord.com/api/webhooks/…
+predict-cli agent watch --notify-cmd 'osascript -e "display notification \"$DETAIL\" with title \"$EVENT_KIND\""'
+```
+
+The agent translates retail intent ("long BTC, $50, 1h") into a sequence of mints/redeems that read to the user as one perp position with continuous P&L. Under the hood, every transaction goes through the existing wallet caps (`--max-cost`, empty-manager-by-default, coin auto-merge) so the safety story is unchanged.
+
+Position store lives at `$XDG_CONFIG_HOME/predict-cli/positions.json` (default `~/.config/predict-cli/positions.json`). Override with `PREDICT_CLI_STORE` for tests.
+
+Full design: [`docs/agentic-perps.md`](docs/agentic-perps.md). Gamified mobile companion: [`docs/mobile-companion.md`](docs/mobile-companion.md).
+
 ## Spend semantics
 
 `predict::mint<Quote>` reads from the manager's aggregate balance, not the wallet directly. The CLI defends the wallet with two structural caps:

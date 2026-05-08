@@ -196,6 +196,8 @@ pub struct WatchArgs {
     pub interval: u64,
     pub once: bool,
     pub only: Option<String>,
+    pub notify_webhook: Option<String>,
+    pub notify_cmd: Option<String>,
 }
 
 pub async fn watch(args: WatchArgs, json: bool) -> Result<()> {
@@ -204,6 +206,8 @@ pub async fn watch(args: WatchArgs, json: bool) -> Result<()> {
         once: args.once,
         only: args.only,
         json,
+        notify_webhook: args.notify_webhook,
+        notify_cmd: args.notify_cmd,
     };
     watch::run(cfg).await
 }

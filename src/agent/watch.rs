@@ -22,12 +22,17 @@ use crate::agent::roll;
 use crate::agent::store::{Position, PositionStatus, Store};
 use crate::server::{self, ServerOracle};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WatchConfig {
     pub interval: Duration,
     pub once: bool,
     pub only: Option<String>,
     pub json: bool,
+    /// POST each CycleEvent as JSON to this URL.
+    pub notify_webhook: Option<String>,
+    /// Run this shell command for each CycleEvent. The event is injected as
+    /// `EVENT_KIND`, `POSITION_ID`, `LEG_INDEX`, `DETAIL` env vars.
+    pub notify_cmd: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -100,6 +105,12 @@ pub async fn run(cfg: WatchConfig) -> Result<()> {
         if let Some(only) = &cfg.only {
             println!("  only       {only}");
         }
+        if cfg.notify_webhook.is_some() {
+            println!("  webhook    on");
+        }
+        if cfg.notify_cmd.is_some() {
+            println!("  notify cmd on");
+        }
         if cfg.once {
             println!("  mode       single cycle");
         }
@@ -108,12 +119,59 @@ pub async fn run(cfg: WatchConfig) -> Result<()> {
 
     loop {
         let summary = run_one_cycle(&cfg).await?;
+        for ev in &summary.events {
+            dispatch_notify(&cfg, ev).await;
+        }
         emit_summary(&summary, cfg.json);
 
         if cfg.once {
             break;
         }
         tokio::time::sleep(cfg.interval).await;
+    }
+    Ok(())
+}
+
+async fn dispatch_notify(cfg: &WatchConfig, ev: &CycleEvent) {
+    if let Some(url) = &cfg.notify_webhook {
+        if let Err(e) = post_webhook(url, ev).await {
+            eprintln!("notify webhook failed: {e}");
+        }
+    }
+    if let Some(cmd) = &cfg.notify_cmd {
+        if let Err(e) = run_notify_cmd(cmd, ev).await {
+            eprintln!("notify cmd failed: {e}");
+        }
+    }
+}
+
+async fn post_webhook(url: &str, ev: &CycleEvent) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    client
+        .post(url)
+        .json(ev)
+        .send()
+        .await
+        .context("posting webhook")?
+        .error_for_status()
+        .context("webhook returned error status")?;
+    Ok(())
+}
+
+async fn run_notify_cmd(cmd: &str, ev: &CycleEvent) -> Result<()> {
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(cmd)
+        .env("EVENT_KIND", &ev.kind)
+        .env("POSITION_ID", &ev.position_id)
+        .env("LEG_INDEX", ev.leg_index.to_string())
+        .env("DETAIL", &ev.detail);
+    let status = command.status().await.context("spawning notify cmd")?;
+    if !status.success() {
+        anyhow::bail!("notify cmd exited with status {status}");
     }
     Ok(())
 }
