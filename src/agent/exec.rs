@@ -79,7 +79,7 @@ pub async fn close(position: &mut Position) -> Result<()> {
     Ok(())
 }
 
-async fn submit_leg(leg: &Leg) -> Result<()> {
+pub(crate) async fn submit_leg(leg: &Leg) -> Result<()> {
     match leg {
         Leg::MintBinary {
             oracle_id,

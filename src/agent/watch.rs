@@ -18,6 +18,7 @@ use owo_colors::OwoColorize;
 
 use crate::agent::exec;
 use crate::agent::plan::{ExitOnSettlement, Leg};
+use crate::agent::roll;
 use crate::agent::store::{Position, PositionStatus, Store};
 use crate::server::{self, ServerOracle};
 
@@ -190,6 +191,33 @@ pub(crate) async fn run_one_cycle(cfg: &WatchConfig) -> Result<CycleSummary> {
                                     leg.oracle_id()
                                 ),
                             });
+
+                            // M3: try auto-roll if the leg's policy says so.
+                            match roll::try_roll(&pos.id, idx).await {
+                                Ok(Some(outcome)) => {
+                                    summary.events.push(CycleEvent {
+                                        at: Utc::now(),
+                                        position_id: pos.id.clone(),
+                                        leg_index: outcome.new_leg_index,
+                                        kind: "rolled".into(),
+                                        detail: format!(
+                                            "new leg submitted on oracle {}",
+                                            outcome.oracle_id
+                                        ),
+                                    });
+                                }
+                                Ok(None) => { /* no roll fits; intentional */ }
+                                Err(e) => {
+                                    summary.failed += 1;
+                                    summary.events.push(CycleEvent {
+                                        at: Utc::now(),
+                                        position_id: pos.id.clone(),
+                                        leg_index: idx,
+                                        kind: "error".into(),
+                                        detail: format!("roll failed: {e}"),
+                                    });
+                                }
+                            }
                         }
                         Err(e) => {
                             summary.failed += 1;

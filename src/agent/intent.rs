@@ -157,7 +157,7 @@ async fn pick_oracle_for_asset(asset: &str, tenor_minutes: u64) -> Result<Server
 }
 
 /// Pull current spot from the oracle's on-chain state.
-async fn read_spot(oracle_id: &str) -> Result<f64> {
+pub(crate) async fn read_spot(oracle_id: &str) -> Result<f64> {
     let rpc = Rpc::new();
     let obj = rpc.get_object(oracle_id).await?;
     let fields = pluck(&obj, &["data", "content", "fields"])
@@ -170,7 +170,7 @@ async fn read_spot(oracle_id: &str) -> Result<f64> {
     Ok(spot_scaled as f64 / scale_factor())
 }
 
-fn round_to_tick(price: f64, tick_scaled: u64) -> f64 {
+pub(crate) fn round_to_tick(price: f64, tick_scaled: u64) -> f64 {
     if tick_scaled == 0 {
         return price;
     }
@@ -181,7 +181,7 @@ fn round_to_tick(price: f64, tick_scaled: u64) -> f64 {
     (price / tick).round() * tick
 }
 
-fn scale_factor() -> f64 {
+pub(crate) fn scale_factor() -> f64 {
     // FLOAT_SCALING is 1e9; on-chain prices are scaled by it.
     1_000_000_000.0
 }

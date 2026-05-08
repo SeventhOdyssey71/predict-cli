@@ -116,6 +116,12 @@ impl Leg {
             Leg::MintBinary { oracle_id, .. } | Leg::MintRange { oracle_id, .. } => oracle_id,
         }
     }
+
+    pub fn rolling(&self) -> RollingPolicy {
+        match self {
+            Leg::MintBinary { rolling, .. } | Leg::MintRange { rolling, .. } => *rolling,
+        }
+    }
 }
 
 /// What the user asked for, what the agent will do, and the bounds on doing it.

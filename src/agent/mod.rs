@@ -8,5 +8,6 @@
 pub mod exec;
 pub mod intent;
 pub mod plan;
+pub mod roll;
 pub mod store;
 pub mod watch;
