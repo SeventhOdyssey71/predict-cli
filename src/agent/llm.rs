@@ -16,31 +16,92 @@ use serde::Deserialize;
 use crate::agent::intent::{IntentSide, StructuredIntent};
 use crate::agent::plan::RollingPolicy;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Pluggable backend for `agent ask`. Any model with an OpenAI-compatible
+/// endpoint plugs in through [`Provider::OpenAICompat`] — that one variant
+/// covers OpenAI, OpenRouter, Groq, DeepSeek, xAI, Together, Ollama, LM Studio,
+/// and vLLM.
+#[derive(Debug, Clone)]
 pub enum Provider {
+    /// Offline regex parser. No API key. Default.
     None,
+    /// Native Anthropic `/v1/messages` API. Uses `ANTHROPIC_API_KEY`.
     Anthropic,
+    /// Any OpenAI-compatible chat-completions endpoint. The agent can call
+    /// read-only tools mid-conversation (list_oracles, read_oracle,
+    /// list_my_positions). API key, base URL, and model are all configurable.
+    OpenAICompat(crate::agent::openai::OpenAICompatConfig),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProviderOverrides {
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
 }
 
 impl Provider {
-    pub fn from_str_or_env(explicit: Option<&str>) -> Result<Self> {
-        let pick = explicit
-            .map(|s| s.to_string())
-            .or_else(|| std::env::var("PREDICT_AGENT_PROVIDER").ok())
-            .unwrap_or_else(|| "none".into());
+    /// Pick a provider from CLI flag overrides, then env, then a smart
+    /// auto-detect, then `none`.
+    ///
+    /// Auto-detect order: if `OPENAI_BASE_URL` is set, use openai-compat;
+    /// else if `OPENAI_API_KEY` is set, use openai-compat; else if
+    /// `ANTHROPIC_API_KEY` is set, use anthropic; else use none.
+    pub fn from_overrides(o: &ProviderOverrides) -> Result<Self> {
+        let explicit_provider = o
+            .provider
+            .clone()
+            .or_else(|| std::env::var("PREDICT_AGENT_PROVIDER").ok());
+
+        let pick = match explicit_provider {
+            Some(p) => p,
+            None => auto_detect_provider(),
+        };
+
         match pick.to_ascii_lowercase().as_str() {
             "none" | "regex" | "offline" => Ok(Self::None),
             "anthropic" | "claude" => Ok(Self::Anthropic),
-            other => bail!("unknown provider `{other}` (expected none|anthropic)"),
+            "openai" | "openai-compat" | "openai_compat" | "compat" => {
+                let cfg = crate::agent::openai::OpenAICompatConfig::resolve(
+                    o.base_url.as_deref(),
+                    o.model.as_deref(),
+                    o.api_key_env.as_deref(),
+                )?;
+                Ok(Self::OpenAICompat(cfg))
+            }
+            other => {
+                bail!("unknown provider `{other}` (expected: none | anthropic | openai-compat)")
+            }
         }
     }
 
-    pub fn label(&self) -> &'static str {
+    /// Back-compat shim for the older `from_str_or_env(explicit)` callers
+    /// (kept so the M4 tests don't have to rewrite).
+    #[allow(dead_code)]
+    pub fn from_str_or_env(explicit: Option<&str>) -> Result<Self> {
+        Self::from_overrides(&ProviderOverrides {
+            provider: explicit.map(|s| s.to_string()),
+            ..Default::default()
+        })
+    }
+
+    pub fn label(&self) -> String {
         match self {
-            Self::None => "none (offline regex)",
-            Self::Anthropic => "anthropic (claude)",
+            Self::None => "none (offline regex)".into(),
+            Self::Anthropic => "anthropic (claude)".into(),
+            Self::OpenAICompat(c) => format!("openai-compat ({} @ {})", c.model, c.base_url),
         }
     }
+}
+
+fn auto_detect_provider() -> String {
+    if std::env::var("OPENAI_BASE_URL").is_ok() || std::env::var("OPENAI_API_KEY").is_ok() {
+        return "openai-compat".into();
+    }
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        return "anthropic".into();
+    }
+    "none".into()
 }
 
 /// Resolve a free-text prompt to a [`StructuredIntent`] using the chosen
@@ -49,6 +110,7 @@ pub async fn resolve(prompt: &str, provider: Provider) -> Result<StructuredInten
     match provider {
         Provider::None => parse_regex(prompt),
         Provider::Anthropic => resolve_anthropic(prompt).await,
+        Provider::OpenAICompat(cfg) => crate::agent::openai::resolve(prompt, cfg).await,
     }
 }
 
@@ -314,23 +376,7 @@ async fn resolve_anthropic(prompt: &str) -> Result<StructuredIntent> {
     parse_intent_json(&raw_text)
 }
 
-const SYSTEM_PROMPT: &str = "You are a strict intent parser for a prediction-market CLI.\n\
-The user will state a directional view in natural language. You return ONLY a JSON object \
-matching this schema, with no surrounding prose, no markdown fences, no commentary:\n\
-\n\
-{\n\
-  \"side\": \"up\" | \"down\" | \"range\",\n\
-  \"asset\": \"BTC\" | \"ETH\" | \"SUI\",\n\
-  \"tenor_minutes\": <integer between 5 and 1440>,\n\
-  \"risk_usdc\": <number > 0, the user's stated dollar risk>,\n\
-  \"tag\": <optional string id, omit if not stated>,\n\
-  \"rationale\": <one-sentence summary of the user's view>\n\
-}\n\
-\n\
-Map common phrasings: long/bullish/UP/above → \"up\"; short/bearish/DOWN/below → \"down\"; \
-range/between/stays → \"range\". If the user does not state a tenor, default to 60. If the user \
-does not state an asset, default to \"BTC\". If the user does not state a risk amount, REFUSE \
-by responding with {\"error\": \"missing risk amount\"}. Never invent oracle ids or strikes.";
+const SYSTEM_PROMPT: &str = include_str!("system_prompt.txt");
 
 /// Parse the model's textual reply as a [`StructuredIntent`]. Tolerates the model
 /// wrapping JSON in ```json ... ``` fences even though the prompt forbids it.
@@ -504,28 +550,97 @@ mod tests {
     fn provider_from_str_or_env_picks_explicit_first() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("PREDICT_AGENT_PROVIDER", "anthropic");
-        assert_eq!(
-            Provider::from_str_or_env(Some("none")).unwrap(),
-            Provider::None
-        );
+        let p = Provider::from_str_or_env(Some("none")).unwrap();
+        assert!(matches!(p, Provider::None));
         std::env::remove_var("PREDICT_AGENT_PROVIDER");
     }
 
     #[test]
     fn provider_from_str_or_env_falls_back_to_env() {
         let _g = ENV_LOCK.lock().unwrap();
+        // Clear auto-detect signals so the env var actually wins.
+        let saved = take_provider_env();
         std::env::set_var("PREDICT_AGENT_PROVIDER", "anthropic");
-        assert_eq!(
-            Provider::from_str_or_env(None).unwrap(),
-            Provider::Anthropic
-        );
+        let p = Provider::from_str_or_env(None).unwrap();
+        assert!(matches!(p, Provider::Anthropic));
         std::env::remove_var("PREDICT_AGENT_PROVIDER");
+        restore_provider_env(saved);
     }
 
     #[test]
     fn provider_default_is_none() {
         let _g = ENV_LOCK.lock().unwrap();
+        let saved = take_provider_env();
         std::env::remove_var("PREDICT_AGENT_PROVIDER");
-        assert_eq!(Provider::from_str_or_env(None).unwrap(), Provider::None);
+        let p = Provider::from_str_or_env(None).unwrap();
+        assert!(matches!(p, Provider::None));
+        restore_provider_env(saved);
+    }
+
+    struct SavedEnv {
+        anthropic: Option<String>,
+        openai_key: Option<String>,
+        openai_base: Option<String>,
+    }
+
+    fn take_provider_env() -> SavedEnv {
+        let saved = SavedEnv {
+            anthropic: std::env::var("ANTHROPIC_API_KEY").ok(),
+            openai_key: std::env::var("OPENAI_API_KEY").ok(),
+            openai_base: std::env::var("OPENAI_BASE_URL").ok(),
+        };
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OPENAI_BASE_URL");
+        saved
+    }
+
+    fn restore_provider_env(s: SavedEnv) {
+        if let Some(v) = s.anthropic {
+            std::env::set_var("ANTHROPIC_API_KEY", v);
+        }
+        if let Some(v) = s.openai_key {
+            std::env::set_var("OPENAI_API_KEY", v);
+        }
+        if let Some(v) = s.openai_base {
+            std::env::set_var("OPENAI_BASE_URL", v);
+        }
+    }
+
+    #[test]
+    fn openai_compat_resolves_from_explicit_flags() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = take_provider_env();
+        std::env::set_var("MY_TEST_KEY", "sk-test");
+        let p = Provider::from_overrides(&ProviderOverrides {
+            provider: Some("openai-compat".into()),
+            base_url: Some("https://example.test/v1".into()),
+            model: Some("test-model".into()),
+            api_key_env: Some("MY_TEST_KEY".into()),
+        })
+        .unwrap();
+        match p {
+            Provider::OpenAICompat(cfg) => {
+                assert_eq!(cfg.base_url, "https://example.test/v1");
+                assert_eq!(cfg.model, "test-model");
+                assert_eq!(cfg.api_key, "sk-test");
+            }
+            other => panic!("expected OpenAICompat, got {other:?}"),
+        }
+        std::env::remove_var("MY_TEST_KEY");
+        restore_provider_env(saved);
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = take_provider_env();
+        let err = Provider::from_overrides(&ProviderOverrides {
+            provider: Some("not-a-real-provider".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+        restore_provider_env(saved);
     }
 }

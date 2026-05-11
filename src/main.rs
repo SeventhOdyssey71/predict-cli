@@ -221,17 +221,32 @@ enum AgentCmd {
     /// Print the full record of a single position.
     Inspect { id: String },
 
-    /// Open a position from a free-text intent. Default provider is the offline
-    /// regex parser (no API key required). Set --provider anthropic (or
-    /// PREDICT_AGENT_PROVIDER=anthropic) plus ANTHROPIC_API_KEY for an LLM-backed
-    /// parser. Either way the same Plan validation runs locally before any tx.
+    /// Open a position from a free-text intent. Three backends:
+    /// `none` (offline regex, default), `anthropic` (native Claude), and
+    /// `openai-compat` (any OpenAI-compatible endpoint with read-only tool
+    /// use: OpenAI, OpenRouter, Groq, DeepSeek, xAI, Mistral, Together,
+    /// Ollama, LM Studio, vLLM). Either way the same Plan validation runs
+    /// locally before any tx.
     Ask {
         /// Free-text intent, e.g. "long BTC for 1h, $50".
         prompt: String,
-        /// Provider override: none | anthropic. Falls back to
-        /// PREDICT_AGENT_PROVIDER, then to none.
+        /// Provider override: none | anthropic | openai-compat. Falls back to
+        /// PREDICT_AGENT_PROVIDER, then auto-detects from env vars.
         #[arg(long)]
         provider: Option<String>,
+        /// Base URL for openai-compat (default OPENAI_BASE_URL or
+        /// https://api.openai.com/v1).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Model name for openai-compat (default OPENAI_MODEL or gpt-4o-mini).
+        /// Examples: gpt-4o, anthropic/claude-sonnet-4 (via OpenRouter),
+        /// llama3 (via Ollama), deepseek-chat.
+        #[arg(long)]
+        model: Option<String>,
+        /// Name of the env var holding the API key (default OPENAI_API_KEY).
+        /// Useful for keeping multiple providers configured side by side.
+        #[arg(long)]
+        api_key_env: Option<String>,
         /// Rolling policy: none | auto.
         #[arg(long, default_value = "none")]
         rolling: String,
@@ -409,6 +424,9 @@ async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
         AgentCmd::Ask {
             prompt,
             provider,
+            base_url,
+            model,
+            api_key_env,
             rolling,
             yes,
         } => {
@@ -416,6 +434,9 @@ async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
                 commands::agent::AskArgs {
                     prompt,
                     provider,
+                    base_url,
+                    model,
+                    api_key_env,
                     rolling,
                     yes,
                 },

@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] — feat/predict-agentic-cli (M6)
+
+### Added
+
+- **OpenAI-compatible provider with tool-using iteration.** `predict-cli agent ask` now supports any model behind an OpenAI-compatible chat-completions endpoint. Works with OpenAI, OpenRouter (any model), Groq, Mistral, DeepSeek, xAI/Grok, Together, Ollama, LM Studio, vLLM.
+- **Read-only tool surface for the agent.** `list_oracles(asset?)`, `read_oracle(oracle_id)`, `list_my_positions()`. The agent can call these mid-conversation to gather context before producing intent; tools never submit transactions.
+- **New CLI flags on `agent ask`:** `--provider {none|anthropic|openai-compat}`, `--base-url`, `--model`, `--api-key-env <VAR>`. Provider precedence: flag > `PREDICT_AGENT_PROVIDER` env var > auto-detect from `OPENAI_*` / `ANTHROPIC_API_KEY` > offline regex.
+- **Iteration loop** in `src/agent/openai.rs` with a hard cap (`MAX_ITERATIONS = 6`) so a stuck conversation fails loudly rather than draining tokens.
+
+### Changed
+
+- `Provider` enum carries an `OpenAICompatConfig` for the openai-compat variant. The system prompt was extracted to `src/agent/system_prompt.txt` and is now shared between the Anthropic and openai-compat backends.
+
+### Internal
+
+- 5 new tests (70/70 passing). The model still produces only `StructuredIntent` JSON; the local planner builds the `Plan` and `Plan::validate` gates it before any tx. That boundary is unchanged.
+
 ## [0.2.0] — feat/predict-agentic-cli
 
 The agentic-perps surface, M1 through M5. See [`docs/agentic-perps.md`](docs/agentic-perps.md) for the design and [`docs/mobile-companion.md`](docs/mobile-companion.md) for the gamified mobile companion that pairs with this engine.

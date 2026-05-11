@@ -1,7 +1,8 @@
 //! `predict-cli agent` subcommand surface.
 //!
-//! M1 only exposes structured-DSL commands: open / positions / close / inspect.
-//! M4 will add `agent ask "..."` for natural-language intent.
+//! Exposes open / ask / positions / inspect / close / watch. `agent open` is
+//! the structured DSL; `agent ask` is the LLM surface with three backends
+//! (offline regex, native Anthropic, and any OpenAI-compatible provider).
 
 use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use crate::agent::exec;
 use crate::agent::intent::{intent_to_plan, IntentSide, StructuredIntent};
-use crate::agent::llm::{self, Provider};
+use crate::agent::llm::{self, Provider, ProviderOverrides};
 use crate::agent::plan::RollingPolicy;
 use crate::agent::store::{PositionStatus, Store};
 use crate::agent::watch::{self, WatchConfig};
@@ -139,12 +140,20 @@ pub async fn close(id: &str, json: bool) -> Result<()> {
 pub struct AskArgs {
     pub prompt: String,
     pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key_env: Option<String>,
     pub yes: bool,
     pub rolling: String,
 }
 
 pub async fn ask(args: AskArgs, json: bool) -> Result<()> {
-    let provider = Provider::from_str_or_env(args.provider.as_deref())?;
+    let provider = Provider::from_overrides(&ProviderOverrides {
+        provider: args.provider.clone(),
+        base_url: args.base_url.clone(),
+        model: args.model.clone(),
+        api_key_env: args.api_key_env.clone(),
+    })?;
 
     if !json {
         println!("{}", "agent ask".bold());

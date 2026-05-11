@@ -208,9 +208,27 @@ predict-cli agent open --side up --asset BTC --tenor 1h --risk 50
 # 2. Natural-language intent (default backend = offline regex; no API key)
 predict-cli agent ask "long BTC for 1h, $50"
 
-# 3. Same, with Claude as the parser
-PREDICT_AGENT_PROVIDER=anthropic ANTHROPIC_API_KEY=… \
-  predict-cli agent ask "I think BTC chops between 80k and 84k for the next 90 minutes, 25 dusdc"
+# 3. Plug in any model via OpenAI-compatible API. The agent has read-only
+#    tools (list_oracles, read_oracle, list_my_positions) it can call
+#    mid-conversation before producing intent.
+OPENAI_API_KEY=sk-… predict-cli agent ask "long BTC for 1h, \$50"
+
+# OpenRouter → any model on the market (Claude, Llama, Mistral, DeepSeek…)
+OPENAI_API_KEY=sk-or-v1-… \
+  OPENAI_BASE_URL=https://openrouter.ai/api/v1 \
+  OPENAI_MODEL=anthropic/claude-sonnet-4 \
+  predict-cli agent ask "fade this BTC rally for 30m, \$10"
+
+# Local Ollama (no API key needed for local; any string will do)
+OPENAI_API_KEY=ollama \
+  OPENAI_BASE_URL=http://localhost:11434/v1 \
+  OPENAI_MODEL=llama3 \
+  predict-cli agent ask "range BTC \$25 for 1h"
+
+# Native Anthropic /v1/messages (separate API surface, no tool use yet)
+ANTHROPIC_API_KEY=… predict-cli agent ask \
+  "BTC chops between 80k and 84k for the next 90 minutes, 25 dusdc" \
+  --provider anthropic
 
 # 4. List, inspect, close
 predict-cli agent positions
