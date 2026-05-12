@@ -64,11 +64,18 @@ enum Cmd {
         stake: f64,
     },
 
-    /// Show or create your PredictManager.
+    /// Show, create, or withdraw from your PredictManager. With no flags it
+    /// prints the manager id, the DUSDC sitting inside it, and your wallet
+    /// balances. `--create` shares a new manager. `--withdraw N` pulls $N
+    /// DUSDC from the manager back into your wallet (use this to collect
+    /// winnings after settlement).
     Manager {
         /// Create a new shared PredictManager.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "withdraw")]
         create: bool,
+        /// Withdraw N DUSDC from the manager into your wallet.
+        #[arg(long)]
+        withdraw: Option<f64>,
     },
 
     /// Deposit DUSDC into your PredictManager.
@@ -314,7 +321,14 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Cmd::Manager { create } => commands::manager::run(create, cli.json).await,
+        Cmd::Manager { create, withdraw } => {
+            commands::manager::dispatch(commands::manager::Args {
+                create,
+                withdraw,
+                json: cli.json,
+            })
+            .await
+        }
         Cmd::Deposit { amount } => commands::trade::deposit(amount).await,
         Cmd::Mint {
             oracle_id,

@@ -178,6 +178,7 @@ predict-cli quote 0xed58…380b --lower 80000 --stake 10           # unbounded a
 ```bash
 predict-cli manager
 predict-cli manager --create
+predict-cli manager --withdraw 14    # collect winnings: pull $14 DUSDC manager → wallet
 predict-cli deposit --amount 100
 
 # Binary: 50 UP units at $82k strike, fund $35, hard-cap manager spend at $40

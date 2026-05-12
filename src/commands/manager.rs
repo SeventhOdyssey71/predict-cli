@@ -1,13 +1,33 @@
-//! `predict-cli manager [--create]` — show or create the user's PredictManager.
+//! `predict-cli manager [--create] [--withdraw <amount>]` — show, create, or
+//! withdraw from the user's PredictManager.
 
 use anyhow::{anyhow, Result};
 use owo_colors::OwoColorize;
 
 use crate::config::{PREDICT_PACKAGE, QUOTE_TYPE};
-use crate::format::{fmt_usd, label};
-use crate::rpc::{pluck, Rpc};
+use crate::format::{fmt_usd, label, to_quote};
+use crate::rpc::Rpc;
 use crate::server;
 use crate::sui_cli;
+
+const WITHDRAW_GAS_BUDGET: u64 = 100_000_000;
+
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub create: bool,
+    pub withdraw: Option<f64>,
+    pub json: bool,
+}
+
+pub async fn dispatch(args: Args) -> Result<()> {
+    if args.create && args.withdraw.is_some() {
+        anyhow::bail!("pass either --create or --withdraw, not both");
+    }
+    if let Some(amount) = args.withdraw {
+        return run_withdraw(amount).await;
+    }
+    run(args.create, args.json).await
+}
 
 pub async fn run(create: bool, json: bool) -> Result<()> {
     sui_cli::check()?;
@@ -39,20 +59,20 @@ pub async fn run(create: bool, json: bool) -> Result<()> {
         println!("  {} {}", label("manager id"), m.manager_id);
         println!("  {} {}", label("created at"), m.checkpoint_timestamp_ms);
 
-        // Fetch DUSDC balance held inside the manager.
-        if let Ok(obj) = rpc.get_object(&m.manager_id).await {
-            if let Some(_owner) = pluck(&obj, &["data", "content", "fields", "owner"]) {
-                let dusdc = rpc
-                    .get_balance(&m.manager_id, Some(QUOTE_TYPE))
-                    .await
-                    .unwrap_or(0);
-                println!(
-                    "  {} {} (held inside manager BalanceManager)",
-                    label("dusdc"),
-                    fmt_usd((dusdc as f64) / 1_000_000.0)
-                );
-            }
-        }
+        // DUSDC inside the manager is held as a Balance<DUSDC> inside the
+        // BalanceManager's dynamic-field table, not as a Coin object. The
+        // suix_getBalance RPC only counts Coins, so it always reports 0 even
+        // when the manager has funds. predict_manager_balance walks the
+        // dynamic-field table directly and returns the actual amount.
+        let dusdc_in_mgr = rpc
+            .predict_manager_balance(&m.manager_id, QUOTE_TYPE)
+            .await
+            .unwrap_or(0);
+        println!(
+            "  {} {} (held inside manager BalanceManager)",
+            label("dusdc"),
+            fmt_usd((dusdc_in_mgr as f64) / 1_000_000.0)
+        );
         // Wallet DUSDC balance.
         if let Ok(b) = rpc.get_balance(&addr, Some(QUOTE_TYPE)).await {
             println!(
@@ -91,6 +111,52 @@ async fn run_create(_addr: &str) -> Result<()> {
         "  Wait a few seconds, then run `{}` to see the new manager.",
         "predict-cli manager".bold()
     );
+    Ok(())
+}
+
+async fn run_withdraw(amount_usdc: f64) -> Result<()> {
+    sui_cli::check()?;
+    let addr = sui_cli::active_address()?;
+    let rpc = Rpc::new();
+
+    let mgr = server::find_manager_for(&addr).await?.ok_or_else(|| {
+        anyhow!("no manager found for {addr}. Run `predict-cli manager --create` first.")
+    })?;
+
+    let available = rpc
+        .predict_manager_balance(&mgr.manager_id, QUOTE_TYPE)
+        .await
+        .unwrap_or(0);
+    let micro_amount = to_quote("--withdraw", amount_usdc)?;
+    if micro_amount > available {
+        anyhow::bail!(
+            "manager only holds {} DUSDC; cannot withdraw ${amount_usdc:.4}",
+            fmt_usd((available as f64) / 1_000_000.0)
+        );
+    }
+
+    println!(
+        "Withdrawing {} from manager → wallet…",
+        fmt_usd(amount_usdc).bold()
+    );
+
+    // PTB: predict_manager::withdraw<DUSDC>(manager, amount) returns Coin<DUSDC>;
+    // transfer it to the sender so it lands in the wallet.
+    let ptb = vec![
+        "--move-call".to_string(),
+        format!("{PREDICT_PACKAGE}::predict_manager::withdraw"),
+        format!("<{QUOTE_TYPE}>"),
+        format!("@{}", mgr.manager_id),
+        format!("{micro_amount}u64"),
+        "--assign".to_string(),
+        "coin".to_string(),
+        "--transfer-objects".to_string(),
+        "[coin]".to_string(),
+        format!("@{addr}"),
+    ];
+    let out = sui_cli::run_ptb(ptb, WITHDRAW_GAS_BUDGET)?;
+    let digest = parse_digest(&out).unwrap_or_else(|| "(unknown)".into());
+    println!("  ✓ tx {digest}");
     Ok(())
 }
 

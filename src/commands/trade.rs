@@ -168,9 +168,12 @@ fn signed_i64(svi_node: &serde_json::Value, key: &str) -> f64 {
 /// Manager's current DUSDC balance held inside its embedded BalanceManager.
 async fn manager_dusdc_balance(manager_id: &str) -> u128 {
     let rpc = Rpc::new();
-    rpc.get_balance(manager_id, Some(QUOTE_TYPE))
+    // DUSDC inside the manager is a Balance<DUSDC> inside the BalanceManager's
+    // dynamic-field table, not a Coin. predict_manager_balance walks the table
+    // and returns the real amount.
+    rpc.predict_manager_balance(manager_id, QUOTE_TYPE)
         .await
-        .unwrap_or(0)
+        .unwrap_or(0) as u128
 }
 
 fn print_spend_preview(

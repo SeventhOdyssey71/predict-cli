@@ -68,6 +68,91 @@ impl Rpc {
         Ok(v.parse::<u128>()?)
     }
 
+    /// Read the DUSDC sitting inside a PredictManager's inner BalanceManager.
+    /// DUSDC there is held as a `Balance<DUSDC>` inside a dynamic-field table,
+    /// not as a `Coin`, so `suix_getBalance(manager_id, …)` returns 0 even
+    /// when there's real money in the manager. This walks the table directly.
+    ///
+    /// `quote_type` is the fully-qualified type, e.g. crate::config::QUOTE_TYPE.
+    /// Returns 0 if the table is empty or the DUSDC field doesn't exist yet.
+    pub async fn predict_manager_balance(
+        &self,
+        predict_manager_id: &str,
+        quote_type: &str,
+    ) -> Result<u64> {
+        let mgr = self.get_object(predict_manager_id).await?;
+
+        // The inner BalanceManager's `balances` field is a Sui Table whose
+        // dynamic fields key by BalanceKey<T>. The Table's UID lives at:
+        let table_id = pluck(
+            &mgr,
+            &[
+                "data",
+                "content",
+                "fields",
+                "balance_manager",
+                "fields",
+                "balances",
+                "fields",
+                "id",
+                "id",
+            ],
+        )
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("manager has no balance_manager.balances table"))?;
+
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(c) => json!([table_id, c, 50]),
+                None => json!([table_id, Value::Null, 50]),
+            };
+            let page = self.call("suix_getDynamicFields", params).await?;
+            let data = page
+                .get("data")
+                .and_then(|d| d.as_array())
+                .ok_or_else(|| anyhow!("getDynamicFields: missing data"))?;
+
+            for entry in data {
+                let object_type = entry
+                    .get("objectType")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default();
+                // Match the typed Balance<DUSDC> field, e.g.
+                //   ...::balance_manager::BalanceKey<...::dusdc::DUSDC>,
+                //   ...::balance::Balance<...::dusdc::DUSDC>>
+                if object_type.contains("balance::Balance") && object_type.contains(quote_type) {
+                    let field_id = entry
+                        .get("objectId")
+                        .and_then(|s| s.as_str())
+                        .ok_or_else(|| anyhow!("dynamic field missing objectId"))?;
+                    let field_obj = self.get_object(field_id).await?;
+                    // The Balance struct is a single-u64 newtype, so Sui RPC
+                    // inlines it as a raw string at `.fields.value` rather
+                    // than wrapping it as `{ type, fields: { value: ... } }`.
+                    let amount =
+                        u64_str(pluck(&field_obj, &["data", "content", "fields", "value"]));
+                    return Ok(amount);
+                }
+            }
+
+            if !page
+                .get("hasNextPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                return Ok(0);
+            }
+            cursor = page
+                .get("nextCursor")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if cursor.is_none() {
+                return Ok(0);
+            }
+        }
+    }
+
     /// Fetch all coin objects of `coin_type` owned by `owner`, paginated.
     pub async fn get_all_coins(&self, owner: &str, coin_type: &str) -> Result<Vec<Coin>> {
         let mut cursor: Option<String> = None;
