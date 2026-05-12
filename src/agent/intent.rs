@@ -156,14 +156,18 @@ async fn pick_oracle_for_asset(asset: &str, tenor_minutes: u64) -> Result<Server
     Ok(chosen.clone())
 }
 
-/// Pull current spot from the oracle's on-chain state.
+/// Pull current spot from the oracle's on-chain state. The on-chain layout
+/// nests price fields under `prices.fields.spot`, matching the same path
+/// `commands::oracle::run` uses for the human view.
 pub(crate) async fn read_spot(oracle_id: &str) -> Result<f64> {
     let rpc = Rpc::new();
     let obj = rpc.get_object(oracle_id).await?;
     let fields = pluck(&obj, &["data", "content", "fields"])
         .ok_or_else(|| anyhow!("oracle {oracle_id} has no fields"))?;
 
-    let spot_scaled = u64_str(pluck(fields, &["spot"]));
+    let prices = pluck(fields, &["prices", "fields"])
+        .ok_or_else(|| anyhow!("oracle {oracle_id} has no prices field"))?;
+    let spot_scaled = u64_str(prices.get("spot"));
     if spot_scaled == 0 {
         bail!("oracle {oracle_id} reports spot = 0; cannot pick strike");
     }
