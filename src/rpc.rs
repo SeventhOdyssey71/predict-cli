@@ -153,6 +153,46 @@ impl Rpc {
         }
     }
 
+    /// Query transaction blocks sent by `sender`, descending by checkpoint.
+    /// Returns up to `limit` per page; pass `cursor` to continue.
+    ///
+    /// `options` controls how much per-tx data the RPC includes — we ask for
+    /// events + balance changes + input objects so the history renderer can
+    /// classify and price each tx without further round-trips.
+    pub async fn query_transactions(
+        &self,
+        sender: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Value> {
+        let query = json!({
+            "filter": { "FromAddress": sender },
+            "options": {
+                // Events carry all the cost/payout info we need; computing
+                // amounts from balance_changes is tempting but the RPC errors
+                // on the entire page when any one tx in it has null effects
+                // ("unable to derive balance/object changes because effect is
+                // empty"). Reading events directly is faster and safer.
+                "showInput": false,
+                "showEvents": true,
+                "showBalanceChanges": false,
+                "showEffects": false,
+                "showRawInput": false,
+                "showObjectChanges": false,
+            },
+        });
+        let cursor_v: Value = match cursor {
+            Some(c) => Value::String(c.into()),
+            None => Value::Null,
+        };
+        // suix_queryTransactionBlocks(query, cursor, limit, descending_order)
+        self.call(
+            "suix_queryTransactionBlocks",
+            json!([query, cursor_v, limit, true]),
+        )
+        .await
+    }
+
     /// Fetch all coin objects of `coin_type` owned by `owner`, paginated.
     pub async fn get_all_coins(&self, owner: &str, coin_type: &str) -> Result<Vec<Coin>> {
         let mut cursor: Option<String> = None;

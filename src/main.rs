@@ -183,6 +183,18 @@ enum Cmd {
     #[command(visible_alias = "setup")]
     Doctor,
 
+    /// Show your activity ledger: mints, redeems, deposits, withdraws, LP flows.
+    /// Pulls the last N transactions for your active address and classifies
+    /// them by Move call.
+    History {
+        /// Max number of entries to display.
+        #[arg(long, default_value_t = 25)]
+        limit: u32,
+        /// Include failed txs (these cost gas but did nothing).
+        #[arg(long)]
+        include_failed: bool,
+    },
+
     /// Manage agent-driven "perp" positions. Subcommands:
     /// open / ask / positions / inspect / close / watch. `ask` accepts natural
     /// language and plugs into any LLM with an OpenAI-compatible API.
@@ -407,6 +419,17 @@ async fn main() -> Result<()> {
         Cmd::Withdraw { plp } => commands::trade::withdraw(&plp).await,
         Cmd::Faucet => commands::faucet::run().await,
         Cmd::Doctor => commands::doctor::run().await,
+        Cmd::History {
+            limit,
+            include_failed,
+        } => {
+            commands::history::run(commands::history::HistoryArgs {
+                limit,
+                include_failed,
+                json: cli.json,
+            })
+            .await
+        }
         Cmd::Agent { sub } => dispatch_agent(sub, cli.json).await,
     }
 }
