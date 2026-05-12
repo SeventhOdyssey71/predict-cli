@@ -44,16 +44,20 @@ pub async fn intent_to_plan(intent: &StructuredIntent) -> Result<Plan> {
     let spot = read_spot(&oracle.oracle_id).await?;
     let strike = round_to_tick(spot, oracle.tick_size);
 
-    // Reserve 70% of risk as deposit, leave 30% headroom for utilization fee.
-    // The wallet caps still bound things; this is just a sane initial split.
-    let deposit = (intent.risk_usdc * 0.70 * 100.0).round() / 100.0;
-    let max_cost = (intent.risk_usdc * 100.0).round() / 100.0;
+    // Deposit the full risk budget so the manager has room to absorb the
+    // contract's all-in price (fair value + utilization fee). The mint will
+    // abort if total cost exceeds `max_cost`, so we lose nothing by funding
+    // 100% upfront. The 70/30 split we used in M1 left 30% un-deposited and
+    // routinely tripped EBalanceManagerBalanceTooLow on real testnet mints.
+    let deposit = (intent.risk_usdc * 100.0).round() / 100.0;
+    let max_cost = deposit;
 
-    // Quantity: we mint enough units that a winning leg pays out roughly the
-    // full risk. Conservatively, assume binary mid-price 0.5 → qty ≈ deposit/0.5.
-    // The on-chain price will refine; quantity is the *upper* bound the user
-    // is willing to mint.
-    let quantity = ((deposit / 0.5) * 100.0).round() / 100.0;
+    // Quantity sized to fit the risk budget at ATM-binary pricing. For a
+    // mid-price binary at ~0.5, qty * 0.5 ≈ deposit, leaving headroom for the
+    // utilization fee. Deep-ITM mints (price near 1.0) intentionally fail
+    // local validation downstream rather than burn the budget on near-certain
+    // payouts.
+    let quantity = ((deposit / 0.6) * 100.0).round() / 100.0;
 
     let leg = match intent.side {
         IntentSide::Up | IntentSide::Down => Leg::MintBinary {

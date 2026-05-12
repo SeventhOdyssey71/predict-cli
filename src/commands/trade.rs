@@ -325,7 +325,11 @@ pub async fn mint_binary(args: MintBinary) -> Result<()> {
     let micro_deposit = to_quote("--deposit", args.deposit)?;
     let coin = pick_funding_coin(micro_deposit).await?;
     let strike_scaled = to_scaled("--strike", args.strike)?;
-    let qty_scaled = to_scaled("--qty", args.quantity)?;
+    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
+    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
+    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
+    // DUSDC than the user expected.
+    let qty_scaled = to_quote("--qty", args.quantity)?;
     let key_fn = if args.is_up { "up" } else { "down" };
 
     println!();
@@ -420,7 +424,11 @@ pub async fn mint_range(args: MintRange) -> Result<()> {
 
     let micro_deposit = to_quote("--deposit", args.deposit)?;
     let coin = pick_funding_coin(micro_deposit).await?;
-    let qty_scaled = to_scaled("--qty", args.quantity)?;
+    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
+    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
+    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
+    // DUSDC than the user expected.
+    let qty_scaled = to_quote("--qty", args.quantity)?;
 
     println!();
     println!(
@@ -480,7 +488,11 @@ pub async fn redeem_binary(args: RedeemBinary) -> Result<()> {
 
     let manager = require_manager().await?;
     let strike_scaled = to_scaled("--strike", args.strike)?;
-    let qty_scaled = to_scaled("--qty", args.quantity)?;
+    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
+    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
+    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
+    // DUSDC than the user expected.
+    let qty_scaled = to_quote("--qty", args.quantity)?;
     let key_fn = if args.is_up { "up" } else { "down" };
     let predict_fn = if args.permissionless {
         "redeem_permissionless"
@@ -536,7 +548,11 @@ pub async fn redeem_range(args: RedeemRange) -> Result<()> {
     let manager = require_manager().await?;
     let lo_scaled = to_scaled("--lower", args.lower)?;
     let hi_scaled = to_scaled("--upper", args.upper)?;
-    let qty_scaled = to_scaled("--qty", args.quantity)?;
+    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
+    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
+    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
+    // DUSDC than the user expected.
+    let qty_scaled = to_quote("--qty", args.quantity)?;
     let expiry = read_oracle_for_quote(&args.oracle_id).await?.expiry;
 
     println!(
