@@ -183,8 +183,9 @@ enum Cmd {
     #[command(visible_alias = "setup")]
     Doctor,
 
-    /// Manage agent-driven "perp" positions: open, list, close, inspect.
-    /// M1 surface is structured-DSL only; `agent ask "..."` arrives in M4.
+    /// Manage agent-driven "perp" positions. Subcommands:
+    /// open / ask / positions / inspect / close / watch. `ask` accepts natural
+    /// language and plugs into any LLM with an OpenAI-compatible API.
     Agent {
         #[command(subcommand)]
         sub: AgentCmd,
