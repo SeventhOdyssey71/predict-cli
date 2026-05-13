@@ -54,11 +54,7 @@ pub async fn run(json: bool) -> Result<()> {
     println!(
         "  {} {}",
         label("trading paused"),
-        if trading_paused {
-            "yes".red().to_string()
-        } else {
-            "no".green().to_string()
-        }
+        if trading_paused { "yes" } else { "no" }
     );
 
     Ok(())

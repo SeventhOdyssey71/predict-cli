@@ -353,13 +353,13 @@ fn parse_tenor(s: &str) -> Result<u64> {
     }
 }
 
-fn format_status(s: PositionStatus) -> String {
+fn format_status(s: PositionStatus) -> &'static str {
     match s {
-        PositionStatus::Pending => "pending".yellow().to_string(),
-        PositionStatus::Open => "open".green().to_string(),
-        PositionStatus::ClosedByUser => "closed".dimmed().to_string(),
-        PositionStatus::Settled => "settled".cyan().to_string(),
-        PositionStatus::Failed => "failed".red().to_string(),
+        PositionStatus::Pending => "pending",
+        PositionStatus::Open => "open",
+        PositionStatus::ClosedByUser => "closed",
+        PositionStatus::Settled => "settled",
+        PositionStatus::Failed => "failed",
     }
 }
 

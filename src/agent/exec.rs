@@ -162,10 +162,7 @@ pub(crate) async fn redeem_leg(leg: &Leg, permissionless: bool) -> Result<()> {
 
 fn save_or_warn(position: &Position) {
     if let Err(e) = persist(position) {
-        eprintln!(
-            "{} could not write position store: {e}",
-            "warning:".yellow()
-        );
+        eprintln!("warning: could not write position store: {e}");
     }
 }
 

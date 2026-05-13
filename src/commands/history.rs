@@ -86,7 +86,7 @@ pub async fn run(args: HistoryArgs) -> Result<()> {
 
     println!("{}", "History".bold());
     println!(
-        "  {:<19} {:<10} {:<12} {}",
+        "  {:<19} {:<12} {:>12}  {}",
         "when".dimmed(),
         "kind".dimmed(),
         "dusdc".dimmed(),
@@ -96,24 +96,28 @@ pub async fn run(args: HistoryArgs) -> Result<()> {
         let when = DateTime::<Utc>::from_timestamp_millis(e.timestamp_ms as i64)
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "?".into());
-        let kind = kind_label(&e.kind);
         let amount = if e.dusdc_delta == 0 {
             "—".dimmed().to_string()
         } else {
             let usdc = (e.dusdc_delta as f64) / 1_000_000.0;
             if usdc >= 0.0 {
-                format!("+{}", fmt_usd(usdc)).green().to_string()
+                format!("+{}", fmt_usd(usdc))
             } else {
-                format!("-{}", fmt_usd(-usdc)).red().to_string()
+                format!("-{}", fmt_usd(-usdc))
             }
         };
-        println!("  {:<19} {:<10} {:<12} {}", when, kind, amount, e.detail);
+        println!(
+            "  {:<19} {:<12} {:>12}  {}",
+            when,
+            kind_label(&e.kind),
+            amount,
+            e.detail
+        );
     }
     println!();
     println!(
-        "  {} tx digests via {}",
-        "→".dimmed(),
-        "https://suivision.xyz/txblock/<digest>".dimmed()
+        "  {} suivision.xyz/txblock/<digest> for full tx detail",
+        "→".dimmed()
     );
 
     Ok(())
@@ -361,15 +365,15 @@ fn describe_lp(parsed: Option<&Value>, direction: &str) -> String {
     )
 }
 
-fn kind_label(k: &HistoryKind) -> String {
+fn kind_label(k: &HistoryKind) -> &'static str {
     match k {
-        HistoryKind::Mint => "MINT".green().to_string(),
-        HistoryKind::Redeem => "REDEEM".cyan().to_string(),
-        HistoryKind::Deposit => "DEPOSIT".blue().to_string(),
-        HistoryKind::Withdraw => "WITHDRAW".magenta().to_string(),
-        HistoryKind::LpSupply => "LP-SUPPLY".yellow().to_string(),
-        HistoryKind::LpWithdraw => "LP-WITHDRAW".yellow().to_string(),
-        HistoryKind::Other => "OTHER".dimmed().to_string(),
+        HistoryKind::Mint => "mint",
+        HistoryKind::Redeem => "redeem",
+        HistoryKind::Deposit => "deposit",
+        HistoryKind::Withdraw => "withdraw",
+        HistoryKind::LpSupply => "lp-supply",
+        HistoryKind::LpWithdraw => "lp-withdraw",
+        HistoryKind::Other => "other",
     }
 }
 

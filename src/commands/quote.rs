@@ -170,7 +170,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!(
         "  {} {} {}",
         label("market"),
-        underlying.cyan(),
+        underlying,
         if let Some(s) = settlement {
             format!(
                 "· spot {} · fwd {} · settled {}",

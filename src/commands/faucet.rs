@@ -22,15 +22,12 @@ pub async fn run() -> Result<()> {
 
     if let Ok(addr) = sui_cli::active_address() {
         println!("   Your active address (paste in Discord):");
-        println!("     {}", addr.cyan());
+        println!("     {}", addr.bold());
         println!();
         println!("   Suggested message:");
-        println!(
-            "     {}",
-            "Trying out DeepBook Predict on testnet — can someone mint me some DUSDC?".italic()
-        );
-        println!("     {}", format!("Address: {}", addr).italic());
-        println!("     {}", "Amount: 10,000 DUSDC is plenty.".italic());
+        println!("     Trying out DeepBook Predict on testnet — can someone mint me some DUSDC?");
+        println!("     Address: {}", addr);
+        println!("     Amount: 10,000 DUSDC is plenty.");
     } else {
         println!(
             "   (Could not read your active sui address — set one up first with `sui client`.)"

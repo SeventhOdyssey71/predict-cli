@@ -58,10 +58,10 @@ pub async fn run(oracle_id: &str, json: bool) -> Result<()> {
     println!(
         "{} {} {} {}",
         "Oracle".bold(),
-        underlying.bold().cyan(),
+        underlying.bold(),
         "·".dimmed(),
         if active {
-            "active".green().to_string()
+            "active".to_string()
         } else {
             "inactive".dimmed().to_string()
         }

@@ -338,11 +338,7 @@ pub async fn mint_binary(args: MintBinary) -> Result<()> {
     println!();
     println!(
         "Submitting {} {} ({} units)…",
-        if args.is_up {
-            "UP".green().to_string()
-        } else {
-            "DOWN".red().to_string()
-        },
+        if args.is_up { "UP" } else { "DOWN" },
         format!("@${}", args.strike).bold(),
         args.quantity
     );
