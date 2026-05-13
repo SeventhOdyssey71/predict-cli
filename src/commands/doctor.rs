@@ -70,7 +70,7 @@ pub async fn run() -> Result<()> {
         println!("  {}  {}", icon, c.name.bold());
         println!("     {}", c.detail);
         if let Some(cmd) = &c.next {
-            println!("     {} {}", "→".dimmed(), cmd.cyan());
+            println!("     {} {}", "→".dimmed(), cmd.bold());
         }
     }
     println!();
@@ -85,17 +85,11 @@ pub async fn run() -> Result<()> {
         .count();
 
     if fails == 0 && warns == 0 {
-        println!("{}", "ready.".green());
+        println!("ready.");
     } else if fails == 0 {
-        println!(
-            "{}",
-            format!("{warns} warning(s); proceed if you only need read paths.").yellow()
-        );
+        println!("{warns} warning(s); proceed if you only need read paths.");
     } else {
-        println!(
-            "{}",
-            format!("{fails} blocking; fix the ✗ items and re-run.").red()
-        );
+        println!("{fails} blocking; fix the ✗ items and re-run.");
     }
 
     Ok(())

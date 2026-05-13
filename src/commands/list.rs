@@ -45,7 +45,7 @@ pub async fn run(json: bool, all: bool) -> Result<()> {
             label(&format!("({})", countdown))
         );
         let status_lbl = match o.status.as_str() {
-            "active" => o.status.green().to_string(),
+            "active" => o.status.clone(),
             "settled" => o.status.dimmed().to_string(),
             other => other.to_string(),
         };

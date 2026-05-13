@@ -1,6 +1,8 @@
+pub mod agent;
 pub mod config;
 pub mod doctor;
 pub mod faucet;
+pub mod history;
 pub mod list;
 pub mod manager;
 pub mod oracle;

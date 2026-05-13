@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
+mod agent;
 mod commands;
 mod config;
 mod format;
@@ -63,11 +64,18 @@ enum Cmd {
         stake: f64,
     },
 
-    /// Show or create your PredictManager.
+    /// Show, create, or withdraw from your PredictManager. With no flags it
+    /// prints the manager id, the DUSDC sitting inside it, and your wallet
+    /// balances. `--create` shares a new manager. `--withdraw N` pulls $N
+    /// DUSDC from the manager back into your wallet (use this to collect
+    /// winnings after settlement).
     Manager {
         /// Create a new shared PredictManager.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "withdraw")]
         create: bool,
+        /// Withdraw N DUSDC from the manager into your wallet.
+        #[arg(long)]
+        withdraw: Option<f64>,
     },
 
     /// Deposit DUSDC into your PredictManager.
@@ -174,6 +182,122 @@ enum Cmd {
     /// Prints the exact next command for anything missing.
     #[command(visible_alias = "setup")]
     Doctor,
+
+    /// Show your activity ledger: mints, redeems, deposits, withdraws, LP flows.
+    /// Pulls the last N transactions for your active address and classifies
+    /// them by Move call.
+    History {
+        /// Max number of entries to display.
+        #[arg(long, default_value_t = 25)]
+        limit: u32,
+        /// Include failed txs (these cost gas but did nothing).
+        #[arg(long)]
+        include_failed: bool,
+    },
+
+    /// Manage agent-driven "perp" positions. Subcommands:
+    /// open / ask / positions / inspect / close / watch. `ask` accepts natural
+    /// language and plugs into any LLM with an OpenAI-compatible API.
+    Agent {
+        #[command(subcommand)]
+        sub: AgentCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Open a managed position from a structured intent.
+    Open {
+        /// up | down | range
+        #[arg(long)]
+        side: String,
+        /// Underlying asset: BTC (more soon).
+        #[arg(long, default_value = "BTC")]
+        asset: String,
+        /// Tenor: e.g. 30m, 1h, 90m. Picks the active oracle whose remaining
+        /// time best matches.
+        #[arg(long, default_value = "1h")]
+        tenor: String,
+        /// Risk budget in DUSDC. Caps total spend for the entire position.
+        #[arg(long)]
+        risk: f64,
+        /// Stable id for this position. Defaults to a generated `p-XXXXXXXX`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Rolling policy: none (single-shot) | auto (M3+; ignored at M1).
+        #[arg(long, default_value = "none")]
+        rolling: String,
+        /// Skip the confirm prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// List managed positions and their current state.
+    Positions,
+    /// Close a managed position. Owner-redeems every still-open leg.
+    Close {
+        /// Position id (`tag` from `agent open` or the generated `p-…`).
+        id: String,
+    },
+    /// Print the full record of a single position.
+    Inspect { id: String },
+
+    /// Open a position from a free-text intent. Three backends:
+    /// `none` (offline regex, default), `anthropic` (native Claude), and
+    /// `openai-compat` (any OpenAI-compatible endpoint with read-only tool
+    /// use: OpenAI, OpenRouter, Groq, DeepSeek, xAI, Mistral, Together,
+    /// Ollama, LM Studio, vLLM). Either way the same Plan validation runs
+    /// locally before any tx.
+    Ask {
+        /// Free-text intent, e.g. "long BTC for 1h, $50".
+        prompt: String,
+        /// Provider override: none | anthropic | openai-compat. Falls back to
+        /// PREDICT_AGENT_PROVIDER, then auto-detects from env vars.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Base URL for openai-compat (default OPENAI_BASE_URL or
+        /// https://api.openai.com/v1).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Model name for openai-compat (default OPENAI_MODEL or gpt-4o-mini).
+        /// Examples: gpt-4o, anthropic/claude-sonnet-4 (via OpenRouter),
+        /// llama3 (via Ollama), deepseek-chat.
+        #[arg(long)]
+        model: Option<String>,
+        /// Name of the env var holding the API key (default OPENAI_API_KEY).
+        /// Useful for keeping multiple providers configured side by side.
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// Rolling policy: none | auto.
+        #[arg(long, default_value = "none")]
+        rolling: String,
+        /// Skip the confirm prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Watch open positions and redeem them automatically when their oracles
+    /// settle. With AutoOnSettlement rolling, a fresh leg is also opened in the
+    /// next expiry as long as budget and tenor permit (M3).
+    Watch {
+        /// Poll cadence in seconds.
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
+        /// Run a single cycle and exit. Useful for cron and CI smoke tests.
+        #[arg(long)]
+        once: bool,
+        /// Only watch one position by id.
+        #[arg(long)]
+        only: Option<String>,
+        /// POST each CycleEvent as JSON to this URL (Discord/Telegram/Slack
+        /// incoming webhooks, custom servers, ntfy.sh, etc).
+        #[arg(long)]
+        notify_webhook: Option<String>,
+        /// Run a shell command on each event with EVENT_KIND, POSITION_ID,
+        /// LEG_INDEX, DETAIL injected as env vars. Example:
+        /// `--notify-cmd 'osascript -e "display notification \"$DETAIL\""'`.
+        #[arg(long)]
+        notify_cmd: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -210,7 +334,14 @@ async fn main() -> Result<()> {
             })
             .await
         }
-        Cmd::Manager { create } => commands::manager::run(create, cli.json).await,
+        Cmd::Manager { create, withdraw } => {
+            commands::manager::dispatch(commands::manager::Args {
+                create,
+                withdraw,
+                json: cli.json,
+            })
+            .await
+        }
         Cmd::Deposit { amount } => commands::trade::deposit(amount).await,
         Cmd::Mint {
             oracle_id,
@@ -288,6 +419,91 @@ async fn main() -> Result<()> {
         Cmd::Withdraw { plp } => commands::trade::withdraw(&plp).await,
         Cmd::Faucet => commands::faucet::run().await,
         Cmd::Doctor => commands::doctor::run().await,
+        Cmd::History {
+            limit,
+            include_failed,
+        } => {
+            commands::history::run(commands::history::HistoryArgs {
+                limit,
+                include_failed,
+                json: cli.json,
+            })
+            .await
+        }
+        Cmd::Agent { sub } => dispatch_agent(sub, cli.json).await,
+    }
+}
+
+async fn dispatch_agent(sub: AgentCmd, json: bool) -> Result<()> {
+    match sub {
+        AgentCmd::Open {
+            side,
+            asset,
+            tenor,
+            risk,
+            tag,
+            rolling,
+            yes,
+        } => {
+            commands::agent::open(
+                commands::agent::OpenArgs {
+                    side,
+                    asset,
+                    tenor,
+                    risk,
+                    tag,
+                    rolling,
+                    yes,
+                },
+                json,
+            )
+            .await
+        }
+        AgentCmd::Ask {
+            prompt,
+            provider,
+            base_url,
+            model,
+            api_key_env,
+            rolling,
+            yes,
+        } => {
+            commands::agent::ask(
+                commands::agent::AskArgs {
+                    prompt,
+                    provider,
+                    base_url,
+                    model,
+                    api_key_env,
+                    rolling,
+                    yes,
+                },
+                json,
+            )
+            .await
+        }
+        AgentCmd::Positions => commands::agent::positions(json).await,
+        AgentCmd::Close { id } => commands::agent::close(&id, json).await,
+        AgentCmd::Inspect { id } => commands::agent::inspect(&id).await,
+        AgentCmd::Watch {
+            interval,
+            once,
+            only,
+            notify_webhook,
+            notify_cmd,
+        } => {
+            commands::agent::watch(
+                commands::agent::WatchArgs {
+                    interval,
+                    once,
+                    only,
+                    notify_webhook,
+                    notify_cmd,
+                },
+                json,
+            )
+            .await
+        }
     }
 }
 

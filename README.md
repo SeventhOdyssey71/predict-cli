@@ -178,6 +178,7 @@ predict-cli quote 0xed58…380b --lower 80000 --stake 10           # unbounded a
 ```bash
 predict-cli manager
 predict-cli manager --create
+predict-cli manager --withdraw 14    # collect winnings: pull $14 DUSDC manager → wallet
 predict-cli deposit --amount 100
 
 # Binary: 50 UP units at $82k strike, fund $35, hard-cap manager spend at $40
@@ -196,6 +197,57 @@ predict-cli redeem-range 0xed58…380b --lower 80000 --upper 84000 --qty 50
 predict-cli supply --amount 1000
 predict-cli withdraw 0xabcd…
 ```
+
+## Agentic Perps
+
+A managed-position layer on top of the imperative trade commands. Every existing command keeps working; `agent` is additive.
+
+```bash
+# 1. Structured intent (no LLM, fully offline)
+predict-cli agent open --side up --asset BTC --tenor 1h --risk 50
+
+# 2. Natural-language intent (default backend = offline regex; no API key)
+predict-cli agent ask "long BTC for 1h, $50"
+
+# 3. Plug in any model via OpenAI-compatible API. The agent has read-only
+#    tools (list_oracles, read_oracle, list_my_positions) it can call
+#    mid-conversation before producing intent.
+OPENAI_API_KEY=sk-… predict-cli agent ask "long BTC for 1h, \$50"
+
+# OpenRouter → any model on the market (Claude, Llama, Mistral, DeepSeek…)
+OPENAI_API_KEY=sk-or-v1-… \
+  OPENAI_BASE_URL=https://openrouter.ai/api/v1 \
+  OPENAI_MODEL=anthropic/claude-sonnet-4 \
+  predict-cli agent ask "fade this BTC rally for 30m, \$10"
+
+# Local Ollama (no API key needed for local; any string will do)
+OPENAI_API_KEY=ollama \
+  OPENAI_BASE_URL=http://localhost:11434/v1 \
+  OPENAI_MODEL=llama3 \
+  predict-cli agent ask "range BTC \$25 for 1h"
+
+# Native Anthropic /v1/messages (separate API surface, no tool use yet)
+ANTHROPIC_API_KEY=… predict-cli agent ask \
+  "BTC chops between 80k and 84k for the next 90 minutes, 25 dusdc" \
+  --provider anthropic
+
+# 4. List, inspect, close
+predict-cli agent positions
+predict-cli agent inspect <id>
+predict-cli agent close <id>
+
+# 5. Settlement daemon: redeems matured positions and (with --rolling auto) rolls into the next expiry
+predict-cli agent watch                          # 30s polling, runs forever
+predict-cli agent watch --once                   # one cycle, cron-friendly
+predict-cli agent watch --notify-webhook https://discord.com/api/webhooks/…
+predict-cli agent watch --notify-cmd 'osascript -e "display notification \"$DETAIL\" with title \"$EVENT_KIND\""'
+```
+
+The agent translates retail intent ("long BTC, $50, 1h") into a sequence of mints/redeems that read to the user as one perp position with continuous P&L. Under the hood, every transaction goes through the existing wallet caps (`--max-cost`, empty-manager-by-default, coin auto-merge) so the safety story is unchanged.
+
+Position store lives at `$XDG_CONFIG_HOME/predict-cli/positions.json` (default `~/.config/predict-cli/positions.json`). Override with `PREDICT_CLI_STORE` for tests.
+
+Full design: [`docs/agentic-perps.md`](docs/agentic-perps.md). Gamified mobile companion: [`docs/mobile-companion.md`](docs/mobile-companion.md).
 
 ## Spend semantics
 
