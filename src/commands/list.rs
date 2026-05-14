@@ -7,7 +7,7 @@ use crate::config::FLOAT_SCALING;
 use crate::format::{fmt_countdown, fmt_expiry, fmt_strike, label, shorten};
 use crate::server;
 
-pub async fn run(json: bool, all: bool) -> Result<()> {
+pub async fn run(json: bool, all: bool, full: bool) -> Result<()> {
     let mut oracles = server::list_oracles().await?;
     if !all {
         oracles.retain(|o| o.status == "active");
@@ -34,7 +34,7 @@ pub async fn run(json: bool, all: bool) -> Result<()> {
         "  {:<12} {:<8}  {:<22}  {:<14} {:<10}  ORACLE",
         "ASSET", "STATUS", "EXPIRY", "MIN STRIKE", "TICK"
     );
-    println!("  {}", "─".repeat(94).dimmed());
+    println!("  {}", "─".repeat(if full { 150 } else { 94 }).dimmed());
     for o in &oracles {
         let min = (o.min_strike as f64) / (FLOAT_SCALING as f64);
         let tick = (o.tick_size as f64) / (FLOAT_SCALING as f64);
@@ -49,6 +49,11 @@ pub async fn run(json: bool, all: bool) -> Result<()> {
             "settled" => o.status.dimmed().to_string(),
             other => other.to_string(),
         };
+        let oracle_disp: String = if full {
+            o.oracle_id.clone()
+        } else {
+            shorten(&o.oracle_id)
+        };
         println!(
             "  {:<12} {:<8}  {:<22}  {:<14} {:<10}  {}",
             o.underlying_asset,
@@ -56,7 +61,14 @@ pub async fn run(json: bool, all: bool) -> Result<()> {
             when,
             fmt_strike(min, &o.underlying_asset),
             fmt_strike(tick, &o.underlying_asset),
-            shorten(&o.oracle_id),
+            oracle_disp,
+        );
+    }
+    if !full && !oracles.is_empty() {
+        println!();
+        println!(
+            "  {}",
+            "tip: rerun with --full to see complete oracle ids for copy-paste".dimmed()
         );
     }
     Ok(())

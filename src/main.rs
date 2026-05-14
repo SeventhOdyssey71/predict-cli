@@ -34,6 +34,9 @@ enum Cmd {
         /// Include settled oracles too.
         #[arg(long)]
         all: bool,
+        /// Print full oracle ids (default truncates for readability).
+        #[arg(long)]
+        full: bool,
     },
 
     /// Inspect one oracle's live state (spot, forward, SVI, settlement).
@@ -307,7 +310,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Cmd::Config => commands::config::run(cli.json).await,
-        Cmd::List { all } => commands::list::run(cli.json, all).await,
+        Cmd::List { all, full } => commands::list::run(cli.json, all, full).await,
         Cmd::Oracle { oracle_id } => commands::oracle::run(&oracle_id, cli.json).await,
         Cmd::Vault => commands::vault::run(cli.json).await,
         Cmd::Quote {
