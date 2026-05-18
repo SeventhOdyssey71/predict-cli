@@ -97,10 +97,16 @@ pub async fn run(create: bool, json: bool) -> Result<()> {
 }
 
 async fn run_create(_addr: &str) -> Result<()> {
+    use crate::config::PREDICT_REGISTRY;
+
     println!("Creating a PredictManager…");
+    // v2: create_and_share_manager is an entry fn in `registry` that creates
+    // the PredictManager (a derived_object keyed by sender) and shares it
+    // in one call. No type-arg — DUSDC is implicit.
     let args = vec![
         "--move-call".to_string(),
-        format!("{PREDICT_PACKAGE}::predict::create_manager"),
+        format!("{PREDICT_PACKAGE}::registry::create_and_share_manager"),
+        format!("@{PREDICT_REGISTRY}"),
     ];
     let out = sui_cli::run_ptb(args, 100_000_000)?;
     let digest =
@@ -140,12 +146,11 @@ async fn run_withdraw(amount_usdc: f64) -> Result<()> {
         fmt_usd(amount_usdc).bold()
     );
 
-    // PTB: predict_manager::withdraw<DUSDC>(manager, amount) returns Coin<DUSDC>;
-    // transfer it to the sender so it lands in the wallet.
+    // v2: predict_manager::withdraw returns Coin<DUSDC>; no type-arg.
+    // Transfer it to the sender so it lands in the wallet.
     let ptb = vec![
         "--move-call".to_string(),
         format!("{PREDICT_PACKAGE}::predict_manager::withdraw"),
-        format!("<{QUOTE_TYPE}>"),
         format!("@{}", mgr.manager_id),
         format!("{micro_amount}u64"),
         "--assign".to_string(),

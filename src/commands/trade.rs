@@ -1,18 +1,23 @@
-//! Trade commands: deposit, mint, mint-range, redeem, redeem-range, supply,
-//! withdraw — every write path goes through `sui client ptb`.
+//! Trade commands (Predict v2 — DUSDC-backed parallel expiry markets).
 //!
-//! Important spend semantics: `predict::mint` reads from the manager's
-//! aggregate balance. The CLI deposits `--deposit` USDC into the manager,
-//! then submits the mint. To keep the default path spend-bounded, mint aborts
-//! if the manager already has DUSDC unless `--allow-manager-balance` is passed.
-//! `--max-cost` caps total manager funds available to the mint.
+//! Every entry below targets the new module layout:
+//!   - `expiry_market::mint` / `expiry_market::redeem` for trades
+//!   - `expiry_market::range_key` for key construction (binary = range with ±∞)
+//!   - `plp::supply` / `plp::withdraw` for LP flows (multi-step valuation PTB)
+//!   - `predict_manager::deposit` / `withdraw` for DUSDC custody (no type-arg)
+//!
+//! User-facing CLI flags keep their v1 names (`--oracle`, `--strike`, etc.)
+//! to minimize disruption — but `--oracle` now refers to the per-expiry
+//! `ExpiryMarket` shared object ID. The CLI internally fetches the paired
+//! `MarketOracle` and `PythSource` shared objects required by the entries.
 
 use anyhow::{anyhow, bail, Result};
 use owo_colors::OwoColorize;
 
 use crate::commands::manager::parse_digest;
 use crate::config::{
-    CLOCK_ID, FLOAT_SCALING, PREDICT_OBJECT, PREDICT_PACKAGE, QUOTE_DECIMALS, QUOTE_TYPE,
+    is_v2_deploy_pending, CLOCK_ID, FLOAT_SCALING, NEG_INF, POOL_VAULT, POS_INF, PREDICT_PACKAGE,
+    PROTOCOL_CONFIG, PYTH_SOURCE_BTC, PYTH_SOURCE_ETH, PYTH_SOURCE_SUI, QUOTE_DECIMALS, QUOTE_TYPE,
 };
 use crate::format::{fmt_usd, label, to_quote, to_scaled};
 use crate::pricing::{binary_price, range_price, SviParams};
@@ -40,6 +45,16 @@ fn validate_strike_range(lo: f64, hi: f64) -> Result<()> {
     Ok(())
 }
 
+fn assert_v2_deployed() -> Result<()> {
+    if is_v2_deploy_pending() {
+        bail!(
+            "Predict v2 not deployed yet — config.rs has unresolved TODO_V2 placeholders.\n\
+             See predict-cli/MIGRATION.md for the deploy-watcher plan."
+        );
+    }
+    Ok(())
+}
+
 async fn require_manager() -> Result<String> {
     let addr = sui_cli::active_address()?;
     let mgr = server::find_manager_for(&addr).await?.ok_or_else(|| {
@@ -52,16 +67,68 @@ async fn require_manager() -> Result<String> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct OracleQuoteState {
+struct MarketQuoteState {
     forward: f64,
     svi: SviParams,
     expiry: u64,
-    active: bool,
+    is_settled: bool,
     settlement: Option<f64>,
 }
 
-/// Return a DUSDC coin with enough balance. If funds are split, consolidate the
-/// smallest needed set into the largest coin first.
+/// Trio of shared object IDs needed by every trade PTB in v2.
+#[derive(Debug, Clone)]
+struct MarketHandles {
+    /// `ExpiryMarket` shared object (the trade target).
+    expiry_market_id: String,
+    /// `MarketOracle` shared object paired with this expiry.
+    market_oracle_id: String,
+    /// `PythSource` shared object for the Pyth Lazer feed this market reads.
+    pyth_source_id: String,
+}
+
+/// Resolve a user-supplied "oracle" arg (now the ExpiryMarket ID) into the
+/// trio of shared objects the v2 Move calls require.
+async fn fetch_market_handles(expiry_market_id: &str) -> Result<MarketHandles> {
+    let rpc = Rpc::new();
+    let market = rpc.get_object(expiry_market_id).await?;
+    let fields = pluck(&market, &["data", "content", "fields"])
+        .ok_or_else(|| anyhow!("expiry market {expiry_market_id}: object content missing"))?;
+    let market_oracle_id = fields
+        .get("market_oracle_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("expiry market {expiry_market_id}: missing market_oracle_id"))?
+        .to_string();
+    let pyth_feed_id = fields
+        .get("pyth_lazer_feed_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("expiry market {expiry_market_id}: missing pyth_lazer_feed_id"))?;
+
+    // Map Pyth Lazer feed ID -> shared PythSource object ID. Until the v2
+    // deploy lands, these come from config.rs constants. After deploy, we
+    // could alternatively call registry::pyth_source_id(feed_id) on-chain.
+    let pyth_source_id = match pyth_feed_id {
+        // BTC, ETH, SUI feed-id assignments are TBD — populated after deploy
+        // when the admin runs registry::create_pyth_source for each asset.
+        1 => PYTH_SOURCE_BTC,
+        2 => PYTH_SOURCE_ETH,
+        3 => PYTH_SOURCE_SUI,
+        other => {
+            bail!(
+                "no PythSource configured for Pyth Lazer feed id {other}. \
+                 Add it to config.rs."
+            )
+        }
+    }
+    .to_string();
+
+    Ok(MarketHandles {
+        expiry_market_id: expiry_market_id.to_string(),
+        market_oracle_id,
+        pyth_source_id,
+    })
+}
+
+/// Return a DUSDC coin with enough balance.
 async fn pick_funding_coin(amount_micro: u64) -> Result<String> {
     let addr = sui_cli::active_address()?;
     let rpc = Rpc::new();
@@ -102,34 +169,26 @@ async fn pick_funding_coin(amount_micro: u64) -> Result<String> {
     Ok(primary)
 }
 
-fn type_arg(t: &str) -> String {
-    format!("<{t}>")
-}
-
-/// Read live oracle SviParams + forward + expiry, used for pre-flight quote.
-async fn read_oracle_for_quote(oracle_id: &str) -> Result<OracleQuoteState> {
+/// Read pricing state for pre-flight quote display.
+///
+/// v2 splits live state across `MarketOracle` (SVI + spot/forward at update
+/// time) and `PythSource` (real-time spot). For the spend preview we use the
+/// MarketOracle's Block-Scholes-side numbers; live execution uses the fresh
+/// oracle resolved on-chain.
+async fn read_market_for_quote(expiry_market_id: &str) -> Result<MarketQuoteState> {
+    let handles = fetch_market_handles(expiry_market_id).await?;
     let rpc = Rpc::new();
-    let resp = rpc.get_object(oracle_id).await?;
-    let fields = pluck(&resp, &["data", "content", "fields"])
-        .ok_or_else(|| anyhow!("oracle: object content missing"))?;
-    let active = fields
-        .get("active")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let prices = pluck(fields, &["prices", "fields"])
-        .cloned()
-        .unwrap_or_default();
-    let svi_node = pluck(fields, &["svi", "fields"])
-        .cloned()
-        .unwrap_or_default();
-    let expiry = u64_str(fields.get("expiry"));
-    let forward_scaled = u64_str(prices.get("forward"));
-    let forward = forward_scaled as f64 / FLOAT_SCALING as f64;
-    let settlement = fields
-        .get("settlement_price")
-        .and_then(option_u64)
-        .map(|v| v as f64 / FLOAT_SCALING as f64);
+    let oracle = rpc.get_object(&handles.market_oracle_id).await?;
+    let fields = pluck(&oracle, &["data", "content", "fields"])
+        .ok_or_else(|| anyhow!("market oracle: object content missing"))?;
 
+    let expiry = u64_str(fields.get("expiry"));
+    let forward_scaled = u64_str(fields.get("block_scholes_forward"));
+    let forward = forward_scaled as f64 / FLOAT_SCALING as f64;
+
+    let svi_node = pluck(fields, &["block_scholes_svi", "fields"])
+        .cloned()
+        .unwrap_or_default();
     let svi = SviParams {
         a: u64_str(svi_node.get("a")) as f64 / FLOAT_SCALING as f64,
         b: u64_str(svi_node.get("b")) as f64 / FLOAT_SCALING as f64,
@@ -137,11 +196,18 @@ async fn read_oracle_for_quote(oracle_id: &str) -> Result<OracleQuoteState> {
         m: signed_i64(&svi_node, "m"),
         sigma: u64_str(svi_node.get("sigma")) as f64 / FLOAT_SCALING as f64,
     };
-    Ok(OracleQuoteState {
+
+    let settlement = fields
+        .get("settlement_price")
+        .and_then(option_u64)
+        .map(|v| v as f64 / FLOAT_SCALING as f64);
+    let is_settled = settlement.is_some();
+
+    Ok(MarketQuoteState {
         forward,
         svi,
         expiry,
-        active,
+        is_settled,
         settlement,
     })
 }
@@ -166,14 +232,15 @@ fn signed_i64(svi_node: &serde_json::Value, key: &str) -> f64 {
 }
 
 /// Manager's current DUSDC balance held inside its embedded BalanceManager.
+/// The PredictManager is a shared object, not an address — `get_balance` on
+/// the manager ID returns 0, so we walk the BalanceManager's dynamic fields
+/// via the `predict_manager_balance` helper.
 async fn manager_dusdc_balance(manager_id: &str) -> u128 {
     let rpc = Rpc::new();
-    // DUSDC inside the manager is a Balance<DUSDC> inside the BalanceManager's
-    // dynamic-field table, not a Coin. predict_manager_balance walks the table
-    // and returns the real amount.
     rpc.predict_manager_balance(manager_id, QUOTE_TYPE)
         .await
-        .unwrap_or(0) as u128
+        .map(|v| v as u128)
+        .unwrap_or(0)
 }
 
 fn print_spend_preview(
@@ -236,30 +303,36 @@ fn print_spend_preview(
     Ok(())
 }
 
-fn assert_mintable_oracle(oracle_id: &str, state: OracleQuoteState) -> Result<()> {
+fn assert_mintable_market(market_id: &str, state: MarketQuoteState) -> Result<()> {
     if let Some(settlement) = state.settlement {
         bail!(
-            "oracle {oracle_id} is settled at {}; minting is closed",
+            "market {market_id} is settled at {}; minting is closed",
             fmt_usd(settlement)
         );
     }
-    if !state.active {
-        bail!("oracle {oracle_id} is not active; minting is closed");
+    if state.is_settled {
+        bail!("market {market_id} is settled; minting is closed");
     }
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     if state.expiry <= now_ms {
-        bail!("oracle {oracle_id} is expired and pending settlement; minting is closed");
+        bail!("market {market_id} is expired and pending settlement; minting is closed");
     }
     if state.forward <= 0.0 {
-        bail!("oracle {oracle_id} has no usable forward price");
+        bail!("market {market_id} has no usable forward price");
     }
     Ok(())
+}
+
+/// Convenience: encode a price into the strike grid scaling.
+fn strike_scaled(name: &str, value: f64) -> Result<u64> {
+    to_scaled(name, value)
 }
 
 /* -------------------------------------------------------------------- deposit */
 
 pub async fn deposit(amount_usdc: f64) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_pos("--amount", amount_usdc)?;
     let manager = require_manager().await?;
     let micro = to_quote("--amount", amount_usdc)?;
@@ -278,8 +351,8 @@ pub async fn deposit(amount_usdc: f64) -> Result<()> {
         "--assign".into(),
         "deposit_coin".into(),
         "--move-call".into(),
+        // v2: no type-arg, DUSDC is implicit.
         format!("{PREDICT_PACKAGE}::predict_manager::deposit"),
-        type_arg(QUOTE_TYPE),
         format!("@{manager}"),
         "deposit_coin.0".into(),
     ];
@@ -288,6 +361,9 @@ pub async fn deposit(amount_usdc: f64) -> Result<()> {
     println!("  ✓ tx {digest}");
     Ok(())
 }
+
+// Manager withdraw lives in `commands::manager::run_withdraw` in the
+// standalone CLI; it's wired into the v2 surface there.
 
 /* ---------------------------------------------------------------- mint binary */
 
@@ -301,8 +377,15 @@ pub struct MintBinary {
     pub allow_manager_balance: bool,
 }
 
+/// In v2 a binary UP/DOWN at `strike` is just a `RangeKey`:
+///   UP   ⇒ `(strike, +∞)`
+///   DOWN ⇒ `(-∞, strike)` ≡ `(0, strike)` because 0 is the neg-inf sentinel.
+///
+/// The Move entry is `expiry_market::mint`, shared with the range path —
+/// only the key differs.
 pub async fn mint_binary(args: MintBinary) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_pos("--strike", args.strike)?;
     validate_pos("--qty", args.quantity)?;
     validate_pos("--deposit", args.deposit)?;
@@ -311,9 +394,10 @@ pub async fn mint_binary(args: MintBinary) -> Result<()> {
     }
 
     let manager = require_manager().await?;
-    let oracle = read_oracle_for_quote(&args.oracle_id).await?;
-    assert_mintable_oracle(&args.oracle_id, oracle)?;
-    let fair = binary_price(oracle.forward, args.strike, args.is_up, oracle.svi);
+    let handles = fetch_market_handles(&args.oracle_id).await?;
+    let market = read_market_for_quote(&args.oracle_id).await?;
+    assert_mintable_market(&args.oracle_id, market)?;
+    let fair = binary_price(market.forward, args.strike, args.is_up, market.svi);
 
     let manager_existing = manager_dusdc_balance(&manager).await;
     print_spend_preview(
@@ -327,18 +411,22 @@ pub async fn mint_binary(args: MintBinary) -> Result<()> {
 
     let micro_deposit = to_quote("--deposit", args.deposit)?;
     let coin = pick_funding_coin(micro_deposit).await?;
-    let strike_scaled = to_scaled("--strike", args.strike)?;
-    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
-    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
-    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
-    // DUSDC than the user expected.
-    let qty_scaled = to_quote("--qty", args.quantity)?;
-    let key_fn = if args.is_up { "up" } else { "down" };
+    let strike_s = strike_scaled("--strike", args.strike)?;
+    let qty_s = to_scaled("--qty", args.quantity)?;
+    let (lower, higher) = if args.is_up {
+        (strike_s, POS_INF)
+    } else {
+        (NEG_INF, strike_s)
+    };
 
     println!();
     println!(
         "Submitting {} {} ({} units)…",
-        if args.is_up { "UP" } else { "DOWN" },
+        if args.is_up {
+            "UP".green().to_string()
+        } else {
+            "DOWN".red().to_string()
+        },
         format!("@${}", args.strike).bold(),
         args.quantity
     );
@@ -351,24 +439,26 @@ pub async fn mint_binary(args: MintBinary) -> Result<()> {
         "deposit_coin".into(),
         "--move-call".into(),
         format!("{PREDICT_PACKAGE}::predict_manager::deposit"),
-        type_arg(QUOTE_TYPE),
         format!("@{manager}"),
         "deposit_coin.0".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::market_key::{key_fn}"),
-        format!("@{}", args.oracle_id),
-        format!("{}u64", oracle.expiry),
-        format!("{strike_scaled}u64"),
+        // v2: range_key is bound to a specific ExpiryMarket — only callable
+        // through expiry_market::range_key (range_key::new is package-private).
+        format!("{PREDICT_PACKAGE}::expiry_market::range_key"),
+        format!("@{}", handles.expiry_market_id),
+        format!("{lower}u64"),
+        format!("{higher}u64"),
         "--assign".into(),
         "key".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::mint"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::expiry_market::mint"),
+        format!("@{}", handles.expiry_market_id),
+        format!("@{PROTOCOL_CONFIG}"),
         format!("@{manager}"),
-        format!("@{}", args.oracle_id),
+        format!("@{}", handles.market_oracle_id),
+        format!("@{}", handles.pyth_source_id),
         "key".into(),
-        format!("{qty_scaled}u64"),
+        format!("{qty_s}u64"),
         format!("@{CLOCK_ID}"),
     ];
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
@@ -391,6 +481,7 @@ pub struct MintRange {
 
 pub async fn mint_range(args: MintRange) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_strike_range(args.lower, args.upper)?;
     validate_pos("--qty", args.quantity)?;
     validate_pos("--deposit", args.deposit)?;
@@ -399,17 +490,12 @@ pub async fn mint_range(args: MintRange) -> Result<()> {
     }
 
     let manager = require_manager().await?;
-    let oracle = read_oracle_for_quote(&args.oracle_id).await?;
-    assert_mintable_oracle(&args.oracle_id, oracle)?;
-    let lo_scaled = to_scaled("--lower", args.lower)?;
-    let hi_scaled = to_scaled("--upper", args.upper)?;
-    let fair = range_price(
-        oracle.forward,
-        lo_scaled,
-        hi_scaled,
-        FLOAT_SCALING as f64,
-        oracle.svi,
-    );
+    let handles = fetch_market_handles(&args.oracle_id).await?;
+    let market = read_market_for_quote(&args.oracle_id).await?;
+    assert_mintable_market(&args.oracle_id, market)?;
+    let lo_s = strike_scaled("--lower", args.lower)?;
+    let hi_s = strike_scaled("--upper", args.upper)?;
+    let fair = range_price(market.forward, lo_s, hi_s, FLOAT_SCALING as f64, market.svi);
 
     let manager_existing = manager_dusdc_balance(&manager).await;
     print_spend_preview(
@@ -423,11 +509,7 @@ pub async fn mint_range(args: MintRange) -> Result<()> {
 
     let micro_deposit = to_quote("--deposit", args.deposit)?;
     let coin = pick_funding_coin(micro_deposit).await?;
-    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
-    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
-    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
-    // DUSDC than the user expected.
-    let qty_scaled = to_quote("--qty", args.quantity)?;
+    let qty_s = to_scaled("--qty", args.quantity)?;
 
     println!();
     println!(
@@ -443,25 +525,24 @@ pub async fn mint_range(args: MintRange) -> Result<()> {
         "deposit_coin".into(),
         "--move-call".into(),
         format!("{PREDICT_PACKAGE}::predict_manager::deposit"),
-        type_arg(QUOTE_TYPE),
         format!("@{manager}"),
         "deposit_coin.0".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::range_key::new"),
-        format!("@{}", args.oracle_id),
-        format!("{}u64", oracle.expiry),
-        format!("{lo_scaled}u64"),
-        format!("{hi_scaled}u64"),
+        format!("{PREDICT_PACKAGE}::expiry_market::range_key"),
+        format!("@{}", handles.expiry_market_id),
+        format!("{lo_s}u64"),
+        format!("{hi_s}u64"),
         "--assign".into(),
         "rkey".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::mint_range"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::expiry_market::mint"),
+        format!("@{}", handles.expiry_market_id),
+        format!("@{PROTOCOL_CONFIG}"),
         format!("@{manager}"),
-        format!("@{}", args.oracle_id),
+        format!("@{}", handles.market_oracle_id),
+        format!("@{}", handles.pyth_source_id),
         "rkey".into(),
-        format!("{qty_scaled}u64"),
+        format!("{qty_s}u64"),
         format!("@{CLOCK_ID}"),
     ];
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
@@ -470,60 +551,59 @@ pub async fn mint_range(args: MintRange) -> Result<()> {
     Ok(())
 }
 
-/* ---------------------------------------------------------- redeem & redeem-range */
+/* ------------------------------------------------------- redeem binary/range */
 
 pub struct RedeemBinary {
     pub oracle_id: String,
     pub strike: f64,
     pub is_up: bool,
     pub quantity: f64,
+    /// v2: `expiry_market::redeem` handles live + settled + compacted in one
+    /// entry. This flag is retained for CLI backwards-compat but ignored.
     pub permissionless: bool,
 }
 
 pub async fn redeem_binary(args: RedeemBinary) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_pos("--strike", args.strike)?;
     validate_pos("--qty", args.quantity)?;
+    let _ = args.permissionless;
 
     let manager = require_manager().await?;
-    let strike_scaled = to_scaled("--strike", args.strike)?;
-    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
-    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
-    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
-    // DUSDC than the user expected.
-    let qty_scaled = to_quote("--qty", args.quantity)?;
-    let key_fn = if args.is_up { "up" } else { "down" };
-    let predict_fn = if args.permissionless {
-        "redeem_permissionless"
+    let handles = fetch_market_handles(&args.oracle_id).await?;
+    let strike_s = strike_scaled("--strike", args.strike)?;
+    let qty_s = to_scaled("--qty", args.quantity)?;
+    let (lower, higher) = if args.is_up {
+        (strike_s, POS_INF)
     } else {
-        "redeem"
+        (NEG_INF, strike_s)
     };
-    let expiry = read_oracle_for_quote(&args.oracle_id).await?.expiry;
 
     println!(
-        "Redeeming {} {} ({} units, fn {})…",
+        "Redeeming {} {} ({} units)…",
         if args.is_up { "UP" } else { "DOWN" },
         format!("@${}", args.strike).bold(),
-        args.quantity,
-        predict_fn
+        args.quantity
     );
 
     let ptb = vec![
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::market_key::{key_fn}"),
-        format!("@{}", args.oracle_id),
-        format!("{expiry}u64"),
-        format!("{strike_scaled}u64"),
+        format!("{PREDICT_PACKAGE}::expiry_market::range_key"),
+        format!("@{}", handles.expiry_market_id),
+        format!("{lower}u64"),
+        format!("{higher}u64"),
         "--assign".into(),
         "key".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::{predict_fn}"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::expiry_market::redeem"),
+        format!("@{}", handles.expiry_market_id),
+        format!("@{PROTOCOL_CONFIG}"),
         format!("@{manager}"),
-        format!("@{}", args.oracle_id),
+        format!("@{}", handles.market_oracle_id),
+        format!("@{}", handles.pyth_source_id),
         "key".into(),
-        format!("{qty_scaled}u64"),
+        format!("{qty_s}u64"),
         format!("@{CLOCK_ID}"),
     ];
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
@@ -541,18 +621,15 @@ pub struct RedeemRange {
 
 pub async fn redeem_range(args: RedeemRange) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_strike_range(args.lower, args.upper)?;
     validate_pos("--qty", args.quantity)?;
 
     let manager = require_manager().await?;
-    let lo_scaled = to_scaled("--lower", args.lower)?;
-    let hi_scaled = to_scaled("--upper", args.upper)?;
-    // `quantity` on-chain is "quote tokens paid out on win" in DUSDC native
-    // units (1e6), not 1e9. Earlier versions used to_scaled() and tripped
-    // EBalanceManagerBalanceTooLow because every mint asked for 1000× more
-    // DUSDC than the user expected.
-    let qty_scaled = to_quote("--qty", args.quantity)?;
-    let expiry = read_oracle_for_quote(&args.oracle_id).await?.expiry;
+    let handles = fetch_market_handles(&args.oracle_id).await?;
+    let lo_s = strike_scaled("--lower", args.lower)?;
+    let hi_s = strike_scaled("--upper", args.upper)?;
+    let qty_s = to_scaled("--qty", args.quantity)?;
 
     println!(
         "Redeeming BETWEEN ${}–${} ({} units)…",
@@ -561,21 +638,21 @@ pub async fn redeem_range(args: RedeemRange) -> Result<()> {
 
     let ptb = vec![
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::range_key::new"),
-        format!("@{}", args.oracle_id),
-        format!("{expiry}u64"),
-        format!("{lo_scaled}u64"),
-        format!("{hi_scaled}u64"),
+        format!("{PREDICT_PACKAGE}::expiry_market::range_key"),
+        format!("@{}", handles.expiry_market_id),
+        format!("{lo_s}u64"),
+        format!("{hi_s}u64"),
         "--assign".into(),
         "rkey".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::redeem_range"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::expiry_market::redeem"),
+        format!("@{}", handles.expiry_market_id),
+        format!("@{PROTOCOL_CONFIG}"),
         format!("@{manager}"),
-        format!("@{}", args.oracle_id),
+        format!("@{}", handles.market_oracle_id),
+        format!("@{}", handles.pyth_source_id),
         "rkey".into(),
-        format!("{qty_scaled}u64"),
+        format!("{qty_s}u64"),
         format!("@{CLOCK_ID}"),
     ];
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
@@ -584,35 +661,102 @@ pub async fn redeem_range(args: RedeemRange) -> Result<()> {
     Ok(())
 }
 
-/* ------------------------------------------------------------------ LP supply */
+/* ------------------------------------------------------------------ LP flows */
+
+/// Read `PoolVault.active_expiry_markets` (vector<ID>) and resolve each
+/// market's paired MarketOracle + PythSource. This drives the valuation
+/// prelude that `plp::supply` / `plp::withdraw` require.
+async fn enumerate_active_markets() -> Result<Vec<MarketHandles>> {
+    let rpc = Rpc::new();
+    let vault = rpc.get_object(POOL_VAULT).await?;
+    let fields = pluck(&vault, &["data", "content", "fields"])
+        .ok_or_else(|| anyhow!("pool vault: object content missing"))?;
+    let ids = fields
+        .get("active_expiry_markets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("pool vault: missing active_expiry_markets vector"))?;
+
+    let mut handles = Vec::with_capacity(ids.len());
+    for id_val in ids {
+        let id = id_val
+            .as_str()
+            .ok_or_else(|| anyhow!("pool vault: active_expiry_markets contained non-string"))?;
+        handles.push(fetch_market_handles(id).await?);
+    }
+    Ok(handles)
+}
+
+/// Build the valuation-prelude PTB fragment.
+///
+/// Output is a `Vec<String>` that emits, in order:
+///   start_valuation(vault, config) -> v
+///   for each active market i:
+///     read_valuation(market_i, config, oracle_i, pyth_i, clock) -> ev_i
+///     add_expiry_valuation(v, ev_i)
+fn valuation_prelude(handles: &[MarketHandles]) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push("--move-call".into());
+    out.push(format!("{PREDICT_PACKAGE}::plp::start_valuation"));
+    out.push(format!("@{POOL_VAULT}"));
+    out.push(format!("@{PROTOCOL_CONFIG}"));
+    out.push("--assign".into());
+    out.push("valuation".into());
+
+    for (i, h) in handles.iter().enumerate() {
+        let ev = format!("ev_{i}");
+        out.push("--move-call".into());
+        out.push(format!("{PREDICT_PACKAGE}::expiry_market::read_valuation"));
+        out.push(format!("@{}", h.expiry_market_id));
+        out.push(format!("@{PROTOCOL_CONFIG}"));
+        out.push(format!("@{}", h.market_oracle_id));
+        out.push(format!("@{}", h.pyth_source_id));
+        out.push(format!("@{CLOCK_ID}"));
+        out.push("--assign".into());
+        out.push(ev.clone());
+
+        out.push("--move-call".into());
+        out.push(format!("{PREDICT_PACKAGE}::plp::add_expiry_valuation"));
+        out.push("valuation".into());
+        out.push(ev);
+    }
+    out
+}
 
 pub async fn supply(amount_usdc: f64) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     validate_pos("--amount", amount_usdc)?;
     let micro = to_quote("--amount", amount_usdc)?;
     let coin = pick_funding_coin(micro).await?;
     let addr = sui_cli::active_address()?;
 
-    println!("Supplying {} to the LP vault…", fmt_usd(amount_usdc).bold());
+    println!("Supplying {} to the PLP pool…", fmt_usd(amount_usdc).bold());
+    let markets = enumerate_active_markets().await?;
+    println!(
+        "  Valuating across {} active expiry markets…",
+        markets.len()
+    );
 
-    let ptb = vec![
+    let mut ptb = valuation_prelude(&markets);
+    ptb.extend([
         "--split-coins".into(),
         format!("@{coin}"),
         format!("[{micro}]"),
         "--assign".into(),
         "supply_coin".into(),
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::supply"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::plp::supply"),
+        format!("@{POOL_VAULT}"),
+        format!("@{PROTOCOL_CONFIG}"),
+        "valuation".into(),
         "supply_coin.0".into(),
-        format!("@{CLOCK_ID}"),
         "--assign".into(),
         "plp_coin".into(),
         "--transfer-objects".into(),
         "[plp_coin]".into(),
         format!("@{addr}"),
-    ];
+    ]);
+
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
     let digest = parse_digest(&out).unwrap_or_else(|| "(unknown)".into());
     println!("  ✓ tx {digest}");
@@ -620,29 +764,36 @@ pub async fn supply(amount_usdc: f64) -> Result<()> {
     Ok(())
 }
 
-/* --------------------------------------------------------------- LP withdraw */
-
 pub async fn withdraw(plp_coin_id: &str) -> Result<()> {
     sui_cli::check()?;
+    assert_v2_deployed()?;
     if !plp_coin_id.starts_with("0x") {
         bail!("invalid PLP coin id: {plp_coin_id}");
     }
     let addr = sui_cli::active_address()?;
     println!("Withdrawing — burning PLP {}…", label(plp_coin_id));
 
-    let ptb = vec![
+    let markets = enumerate_active_markets().await?;
+    println!(
+        "  Valuating across {} active expiry markets…",
+        markets.len()
+    );
+
+    let mut ptb = valuation_prelude(&markets);
+    ptb.extend([
         "--move-call".into(),
-        format!("{PREDICT_PACKAGE}::predict::withdraw"),
-        type_arg(QUOTE_TYPE),
-        format!("@{PREDICT_OBJECT}"),
+        format!("{PREDICT_PACKAGE}::plp::withdraw"),
+        format!("@{POOL_VAULT}"),
+        format!("@{PROTOCOL_CONFIG}"),
+        "valuation".into(),
         format!("@{plp_coin_id}"),
-        format!("@{CLOCK_ID}"),
         "--assign".into(),
         "out_coin".into(),
         "--transfer-objects".into(),
         "[out_coin]".into(),
         format!("@{addr}"),
-    ];
+    ]);
+
     let out = sui_cli::run_ptb(ptb, DEFAULT_GAS_BUDGET)?;
     let digest = parse_digest(&out).unwrap_or_else(|| "(unknown)".into());
     println!("  ✓ tx {digest}");
@@ -673,8 +824,8 @@ mod tests {
     }
 
     #[test]
-    fn mintable_oracle_rejects_closed_states() {
-        let state = OracleQuoteState {
+    fn mintable_market_rejects_closed_states() {
+        let state = MarketQuoteState {
             forward: 80_000.0,
             svi: SviParams {
                 a: 0.0,
@@ -684,16 +835,22 @@ mod tests {
                 sigma: 0.0,
             },
             expiry: u64::MAX,
-            active: false,
+            is_settled: false,
             settlement: None,
         };
-        assert!(assert_mintable_oracle("0x1", state).is_err());
-
-        let settled = OracleQuoteState {
-            active: true,
+        let settled = MarketQuoteState {
+            is_settled: true,
             settlement: Some(80_000.0),
             ..state
         };
-        assert!(assert_mintable_oracle("0x1", settled).is_err());
+        assert!(assert_mintable_market("0x1", settled).is_err());
+    }
+
+    #[test]
+    fn binary_key_bounds_match_sentinels() {
+        // UP @ strike means range (strike, +∞); DOWN means (-∞, strike).
+        // Sanity-check the sentinel constants line up with Move's constants.
+        assert_eq!(POS_INF, u64::MAX);
+        assert_eq!(NEG_INF, 0);
     }
 }

@@ -10,11 +10,16 @@ pub async fn run(json: bool) -> Result<()> {
     if json {
         let v = serde_json::json!({
             "network": config::NETWORK,
+            "v2_deploy_pending": config::is_v2_deploy_pending(),
             "rpc_url": config::rpc_url(),
             "predict_server": config::predict_server(),
             "package": config::PREDICT_PACKAGE,
             "registry": config::PREDICT_REGISTRY,
-            "predict_object": config::PREDICT_OBJECT,
+            "protocol_config": config::PROTOCOL_CONFIG,
+            "pool_vault": config::POOL_VAULT,
+            "pyth_source_btc": config::PYTH_SOURCE_BTC,
+            "pyth_source_eth": config::PYTH_SOURCE_ETH,
+            "pyth_source_sui": config::PYTH_SOURCE_SUI,
             "quote_type": config::QUOTE_TYPE,
             "plp_type": config::plp_type(),
             "dusdc_currency": config::DUSDC_CURRENCY_ID,
@@ -26,7 +31,13 @@ pub async fn run(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", "DeepBook Predict — testnet config".bold());
+    println!("{}", "DeepBook Predict — testnet config (v2)".bold());
+    if config::is_v2_deploy_pending() {
+        println!(
+            "  {} predict v2 deploy is pending; some IDs are placeholders.",
+            "note".yellow()
+        );
+    }
     println!();
     let kv = |k: &str, v: &str| println!("  {} {}", label(&format!("{:<20}", k)), v);
     kv("network", config::NETWORK);
@@ -35,7 +46,11 @@ pub async fn run(json: bool) -> Result<()> {
     println!();
     kv("package", config::PREDICT_PACKAGE);
     kv("registry", config::PREDICT_REGISTRY);
-    kv("predict object", config::PREDICT_OBJECT);
+    kv("protocol config", config::PROTOCOL_CONFIG);
+    kv("pool vault", config::POOL_VAULT);
+    kv("pyth btc", config::PYTH_SOURCE_BTC);
+    kv("pyth eth", config::PYTH_SOURCE_ETH);
+    kv("pyth sui", config::PYTH_SOURCE_SUI);
     kv("quote type", config::QUOTE_TYPE);
     kv("plp type", &config::plp_type());
     kv("dusdc currency", config::DUSDC_CURRENCY_ID);

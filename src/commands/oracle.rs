@@ -1,4 +1,12 @@
-//! `predict-cli oracle <ID>` — read the live OracleSVI shared object.
+//! `predict-cli oracle <ID>` — read the v2 `MarketOracle` shared object.
+//!
+//! In v2 the live state is split:
+//!   - `MarketOracle` holds SVI + Black-Scholes spot/forward + settlement.
+//!   - `PythSource` (one per Pyth Lazer feed) holds the real-time spot used
+//!     for live pricing freshness checks.
+//!
+//! The CLI accepts EITHER a MarketOracle ID OR an ExpiryMarket ID. ExpiryMarket
+//! inputs are transparently resolved to the paired MarketOracle.
 
 use anyhow::{anyhow, Result};
 use owo_colors::OwoColorize;
@@ -15,29 +23,37 @@ pub async fn run(oracle_id: &str, json: bool) -> Result<()> {
     let fields = pluck(&resp, &["data", "content", "fields"])
         .ok_or_else(|| anyhow!("oracle: object content missing — wrong id or not visible"))?;
 
+    // ExpiryMarket has `market_oracle_id`; resolve to the paired oracle.
+    if let Some(paired) = fields
+        .get("market_oracle_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        println!(
+            "  {} ID resolved as ExpiryMarket; reading paired MarketOracle…",
+            "ℹ".cyan()
+        );
+        return Box::pin(run(&paired, json)).await;
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(fields)?);
         return Ok(());
     }
 
-    let underlying = fields
-        .get("underlying_asset")
+    let expiry = u64_str(fields.get("expiry"));
+    let spot = u64_str(fields.get("block_scholes_spot"));
+    let forward = u64_str(fields.get("block_scholes_forward"));
+    let svi_source_ts = u64_str(fields.get("block_scholes_svi_source_timestamp_ms"));
+    let svi_update_ts = u64_str(fields.get("block_scholes_svi_update_timestamp_ms"));
+    let price_source_ts = u64_str(fields.get("block_scholes_price_source_timestamp_ms"));
+    let price_update_ts = u64_str(fields.get("block_scholes_price_update_timestamp_ms"));
+    let pyth_source_id = fields
+        .get("pyth_source_id")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let active = fields
-        .get("active")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let expiry = u64_str(fields.get("expiry"));
-    let timestamp = u64_str(fields.get("timestamp"));
 
-    let prices = pluck(fields, &["prices", "fields"])
-        .cloned()
-        .unwrap_or(Value::Null);
-    let spot = u64_str(prices.get("spot"));
-    let forward = u64_str(prices.get("forward"));
-
-    let svi = pluck(fields, &["svi", "fields"])
+    let svi = pluck(fields, &["block_scholes_svi", "fields"])
         .cloned()
         .unwrap_or(Value::Null);
     let a = u64_str(svi.get("a")) as f64 / FLOAT_SCALING as f64;
@@ -55,44 +71,47 @@ pub async fn run(oracle_id: &str, json: bool) -> Result<()> {
     let spot_f = (spot as f64) / (FLOAT_SCALING as f64);
     let forward_f = (forward as f64) / (FLOAT_SCALING as f64);
 
+    let active = settlement.is_none() && expiry > now_ms;
     println!(
-        "{} {} {} {}",
-        "Oracle".bold(),
-        underlying.bold(),
+        "{} {} {}",
+        "MarketOracle".bold(),
         "·".dimmed(),
         if active {
-            "active".to_string()
+            "active".green().to_string()
+        } else if settlement.is_some() {
+            "settled".dimmed().to_string()
         } else {
-            "inactive".dimmed().to_string()
+            "pending settlement".yellow().to_string()
         }
     );
     println!("  {} {}", label("id"), oracle_id);
+    println!("  {} {}", label("pyth source"), pyth_source_id);
     println!();
     println!("  {} {}", label("expiry"), fmt_expiry(expiry));
     println!("  {} {}", label("countdown"), fmt_countdown(now_ms, expiry));
-    println!(
-        "  {} {} ({}ms ago)",
-        label("last update"),
-        fmt_expiry(timestamp),
-        if timestamp > 0 {
-            now_ms.saturating_sub(timestamp)
-        } else {
-            0
-        }
-    );
     println!();
-    println!("  {}", "Prices".bold());
-    println!("    {} {}", label("spot"), fmt_strike(spot_f, underlying));
-    println!(
-        "    {} {}",
-        label("forward"),
-        fmt_strike(forward_f, underlying)
-    );
+    println!("  {}", "Block-Scholes prices".bold());
+    println!("    {} {}", label("spot"), fmt_strike(spot_f, "?"));
+    println!("    {} {}", label("forward"), fmt_strike(forward_f, "?"));
     if forward_f > 0.0 && spot_f > 0.0 {
         let basis = forward_f / spot_f;
         let bp = (basis - 1.0) * 10_000.0;
         println!("    {} {:.5}  ({:+.2} bps)", label("basis"), basis, bp);
     }
+    println!(
+        "    {} src {} · upd {}",
+        label("price ts"),
+        if price_source_ts > 0 {
+            fmt_expiry(price_source_ts)
+        } else {
+            "—".into()
+        },
+        if price_update_ts > 0 {
+            fmt_expiry(price_update_ts)
+        } else {
+            "—".into()
+        }
+    );
     println!();
     println!("  {}", "SVI".bold());
     println!("    {} {:.6}", label("a"), a);
@@ -100,8 +119,22 @@ pub async fn run(oracle_id: &str, json: bool) -> Result<()> {
     println!("    {} {:+.6}", label("rho"), rho_signed);
     println!("    {} {:+.6}", label("m"), m_signed);
     println!("    {} {:.6}", label("sigma"), sigma);
+    println!(
+        "    {} src {} · upd {}",
+        label("svi ts"),
+        if svi_source_ts > 0 {
+            fmt_expiry(svi_source_ts)
+        } else {
+            "—".into()
+        },
+        if svi_update_ts > 0 {
+            fmt_expiry(svi_update_ts)
+        } else {
+            "—".into()
+        }
+    );
     let days = ((expiry.saturating_sub(now_ms) as f64) / 86_400_000.0).max(0.0001);
-    let svi = SviParams {
+    let svi_params = SviParams {
         a,
         b,
         rho: rho_signed,
@@ -111,7 +144,7 @@ pub async fn run(oracle_id: &str, json: bool) -> Result<()> {
     println!(
         "    {} {:.1}%  (annualized, ATM)",
         label("implied vol"),
-        atm_vol(svi, days)
+        atm_vol(svi_params, days)
     );
     if let Some(s) = settlement {
         println!();
